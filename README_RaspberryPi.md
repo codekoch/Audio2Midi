@@ -62,6 +62,11 @@ python bpm_key_display.py
   zusätzlich auf die erkannten Zählzeiten ein (Tick 1 von 24 liegt auf
   dem Beat), statt nur im richtigen Tempo frei zu laufen. Die Phase wird
   sanft nachgeregelt (max. 1,5 ms pro Tick), sodass die Clock nie springt.
+- Die MIDI-Clock läuft grundsätzlich erst, sobald ein Tempo erkannt
+  wurde (vorher wäre es ein fiktives Tempo): Bei der ersten Schätzung
+  wird MIDI-`start` gesendet -- mit Beat-Sync exakt auf dem nächsten
+  Beat --, bei Stille/Songwechsel stoppt die Clock (`stop`) und startet
+  beim nächsten Stück neu.
 - **BPM-Bereich** (Standard 70–140): Suchbereich der Tempo-Erkennung.
   Genau eine Oktave (Faktor 2) macht die Oktav-Zuordnung eindeutig;
   ein breiterer Bereich (z. B. 60–180) erfasst auch sehr langsame oder

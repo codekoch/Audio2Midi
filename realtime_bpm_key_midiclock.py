@@ -656,13 +656,14 @@ def precise_sleep_until(target_perf, stop_event):
 
 
 def clock_worker(shared, midi_out, stop_event):
+    """MIDI-Clock-Thread. Die Clock laeuft NUR, wenn eine echte Tempo-
+    Schaetzung vorliegt: vorher waere es ein fiktives Tempo (INITIAL_BPM).
+    Bei Stille/Reset stoppt sie (MIDI 'stop') und startet beim naechsten
+    Stueck neu ('start') -- im Beat-Sync-Modus exakt auf dem naechsten
+    erkannten Beat."""
     clock_msg = mido.Message('clock')
-    if midi_out is not None:
-        midi_out.send(mido.Message('start'))
-
-    with shared.lock:
-        cur_bpm = shared.target_bpm
-
+    running = False
+    cur_bpm = INITIAL_BPM
     next_tick = time.perf_counter()
     last_loop = next_tick
     tick_in_beat = 0            # 0..PPQN-1; Tick 0 soll auf dem Beat liegen
@@ -670,10 +671,52 @@ def clock_worker(shared, midi_out, stop_event):
     while not stop_event.is_set():
         with shared.lock:
             target = shared.target_bpm
+            have = shared.have_estimate
             bs = shared.beat_sync
             b_anchor = shared.beat_anchor
             b_period = shared.beat_period
             b_valid = shared.beat_valid_time
+
+        if not have:
+            # Kein Signal / noch keine Schaetzung -> Clock anhalten.
+            if running:
+                running = False
+                try:
+                    if midi_out is not None:
+                        midi_out.send(mido.Message('stop'))
+                except Exception:
+                    break
+            time.sleep(0.05)
+            last_loop = time.perf_counter()
+            continue
+
+        if not running:
+            # Schaetzung da -> Clock (wieder) starten; nicht von 120
+            # hochslewen, sondern direkt im erkannten Tempo loslegen.
+            running = True
+            cur_bpm = max(20.0, min(400.0, target))
+            now = time.perf_counter()
+            next_tick = now
+            tick_in_beat = 0
+            if bs and b_period > 0 and (now - b_valid) < BEAT_VALID_SEC:
+                # Beat-Sync: ersten Tick auf den naechsten Beat legen,
+                # damit die Clock von Anfang an auf der Zaehlzeit liegt.
+                m = math.ceil((now - b_anchor) / b_period)
+                next_tick = b_anchor + m * b_period
+            last_loop = now
+            try:
+                if midi_out is not None:
+                    midi_out.send(mido.Message('start'))
+            except Exception:
+                break
+            precise_sleep_until(next_tick, stop_event)
+            try:
+                if midi_out is not None:
+                    midi_out.send(clock_msg)
+            except Exception:
+                break
+            tick_in_beat = 1
+            continue
 
         now = time.perf_counter()
         dt = now - last_loop
@@ -715,7 +758,7 @@ def clock_worker(shared, midi_out, stop_event):
         tick_in_beat = (tick_in_beat + 1) % PPQN
 
     try:
-        if midi_out is not None:
+        if midi_out is not None and running:
             midi_out.send(mido.Message('stop'))
     except Exception:
         pass
