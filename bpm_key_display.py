@@ -1,0 +1,732 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+bpm_key_display.py
+==================
+
+Fullscreen-Anzeige (BPM + Tonart) fuer ein 7-Zoll-Display (800x600),
+gedacht fuer den Raspberry Pi -- laeuft zum Testen aber genauso unter
+Windows in einem normalen Fenster.
+
+Der Analyse- und MIDI-Clock-Kern wird aus realtime_bpm_key_midiclock.py
+importiert (gleiche Logik, eine Codebasis). Dieses Skript ersetzt nur die
+Konsolen-Bedienung durch eine Touch-taugliche Oberflaeche:
+
+  * Erststart: Auswahlbildschirm fuer Audio-Eingang und MIDI-Ausgang.
+    Die Wahl wird in display_config.json gespeichert; danach startet das
+    Programm direkt in die Anzeige (Kiosk-Betrieb).
+  * Unter Windows stehen zusaetzlich "Loopback:"-Eintraege in der Liste
+    (Ausgabe mithoeren, z. B. Spotify; braucht das Paket 'soundcard').
+    Auf dem Pi uebernehmen das die PipeWire/Pulse-"Monitor"-Eingaenge,
+    die als normale Eingaenge erscheinen.
+  * Hauptbildschirm: BPM gross, Tonart darunter, Pegelbalken, Status.
+
+Start:
+    python bpm_key_display.py                # Pi: Vollbild, Windows: Fenster
+    python bpm_key_display.py --fullscreen   # Vollbild erzwingen
+    python bpm_key_display.py --windowed     # Fenster erzwingen
+    python bpm_key_display.py --setup        # Auswahlbildschirm erzwingen
+
+Tasten:  F11 = Vollbild umschalten,  Esc = Beenden.
+"""
+
+import json
+import math
+import os
+import sys
+import threading
+
+import numpy as np
+
+try:
+    import tkinter as tk
+    import tkinter.font as tkfont
+except ImportError:
+    sys.exit("Tkinter fehlt. Raspberry Pi OS: sudo apt install python3-tk")
+
+try:
+    import sounddevice as sd
+except ImportError:
+    sys.exit("Fehlt: 'sounddevice'. Installiere mit: pip install sounddevice")
+
+import mido
+
+import realtime_bpm_key_midiclock as core
+
+# Windows: Die Wiedergabe (z. B. Spotify) laesst sich per Loopback mithoeren.
+# Auf dem Raspberry Pi ist das ueberfluessig -- dort erscheinen die
+# PipeWire/Pulse-"Monitor"-Quellen als normale Eingaenge in der Geraeteliste.
+sc = None
+if sys.platform == 'win32':
+    try:
+        import warnings
+        import soundcard as sc
+        # soundcard schaltet beim Import seine Warnungen auf 'always' und
+        # ueberschreibt damit den Filter des Kernmoduls -> erneut daempfen.
+        warnings.filterwarnings("ignore",
+                                message="data discontinuity in recording")
+    except Exception:
+        sc = None
+
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "display_config.json")
+
+# Farbschema (dunkles Kiosk-Display)
+COL_BG      = "#16161a"   # Hintergrund
+COL_FG      = "#F1EFE8"   # Hauptschrift (BPM)
+COL_MUTED   = "#888780"   # Beschriftungen / Nebentext
+COL_ACCENT  = "#9FE1CB"   # Tonart
+COL_OK      = "#5DCAA5"   # Status "laeuft" / Pegelbalken
+COL_WARN    = "#EF9F27"   # Status "kein Signal"
+COL_BAR_BG  = "#2c2c2a"   # Pegelbalken-Hintergrund
+COL_SURFACE = "#222226"   # Listen/Buttons im Setup
+COL_SURF_HI = "#33333a"   # Hover/Active
+
+
+def parallel_key(key):
+    """Paralleltonart zu 'C Dur' / 'A Moll' usw.; '' wenn nicht bestimmbar."""
+    parts = key.split()
+    if len(parts) != 2 or parts[0] not in core.NOTE_NAMES:
+        return ""
+    i = core.NOTE_NAMES.index(parts[0])
+    if parts[1] == "Dur":
+        return f"{core.NOTE_NAMES[(i + 9) % 12]} Moll"
+    if parts[1] == "Moll":
+        return f"{core.NOTE_NAMES[(i + 3) % 12]} Dur"
+    return ""
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Konfiguration konnte nicht gespeichert werden: {e}]")
+
+
+class DisplayApp:
+    def __init__(self, root, fullscreen, force_setup=False):
+        self.root = root
+        root.title("BPM & Tonart")
+        root.configure(bg=COL_BG)
+        root.geometry("800x600")
+        root.minsize(480, 360)
+        root.protocol("WM_DELETE_WINDOW", self.quit_app)
+        root.bind("<F11>", lambda e: self.set_fullscreen(not self.fullscreen))
+        root.bind("<Escape>", lambda e: self.quit_app())
+        root.bind("<Configure>", self._on_resize)
+
+        # ---- Laufzeit-Zustand (Analyse-Kern) ----
+        self.shared = core.Shared()
+        self.audio_q = core.queue.Queue()
+        self.app_stop = threading.Event()     # beendet den Analyse-Thread
+        self.analysis_thread = None
+        self.stream = None                    # sounddevice-InputStream
+        self.cap_thread = None                # Loopback-Aufnahme-Thread
+        self.cap_stop = None
+        self.clock_stop = None
+        self.clock_thread = None
+        self.midi_out = None
+        self.midi_name = None
+        self.warmed = False
+        self.status_override = None           # z. B. "Initialisiere ..."
+        self._begin_args = None               # vom Warmup-Thread gesetzt;
+                                              # _tick() startet dann die Session
+                                              # (Tk darf nur im Main-Thread laufen)
+        self._last_height = 0
+        self._bpm_big = True                  # BPM-Label gerade gross/aktiv?
+        self._load_options()                  # Optionen + BPM-Bereich anwenden
+
+        # ---- Schriften (Groesse wird bei Resize angepasst) ----
+        self.f_bpm     = tkfont.Font(family="Helvetica", size=-160)
+        self.f_key     = tkfont.Font(family="Helvetica", size=-60)
+        self.f_key_par = tkfont.Font(family="Helvetica", size=-26)
+        self.f_cap   = tkfont.Font(family="Helvetica", size=-16)
+        self.f_small = tkfont.Font(family="Helvetica", size=-14)
+        self.f_h1    = tkfont.Font(family="Helvetica", size=-26)
+        self.f_list  = tkfont.Font(family="Helvetica", size=-17)
+        self.f_btn   = tkfont.Font(family="Helvetica", size=-16)
+
+        self._build_main_frame()
+        self._build_setup_frame()
+
+        self.fullscreen = False
+        if fullscreen:
+            self.set_fullscreen(True)
+
+        self._tick()
+
+        # ---- Autostart, falls gespeicherte Geraete vorhanden sind ----
+        cfg = load_config()
+        auto = None
+        if not force_setup and cfg.get("input_name"):
+            src = self._find_saved_source(cfg)
+            midi = cfg.get("midi_output") or None
+            if midi and midi not in mido.get_output_names():
+                midi = "?"                    # gespeicherter Port fehlt
+            if src is not None and midi != "?":
+                auto = (src, midi)
+        if auto is not None:
+            self.start_session(*auto)
+        else:
+            self.show_setup()
+
+    def _load_options(self):
+        """Anzeige-Optionen und BPM-Suchbereich aus der Konfiguration lesen
+        und den Suchbereich direkt im Analyse-Kern setzen."""
+        cfg = load_config()
+        self.opt_bpm_decimal = bool(cfg.get("bpm_dezimal", False))
+        self.opt_beat_sync = bool(cfg.get("beat_sync", False))
+        try:
+            mn = float(cfg.get("min_bpm", 70))
+            mx = float(cfg.get("max_bpm", 140))
+        except (TypeError, ValueError):
+            mn, mx = 70.0, 140.0
+        if not (30.0 <= mn < mx <= 300.0):
+            mn, mx = 70.0, 140.0
+        self.opt_min_bpm, self.opt_max_bpm = mn, mx
+        core.MIN_BPM = mn
+        core.MAX_BPM = mx
+        # Tempo-Prior in die Mitte des Bereichs legen (geometrisch)
+        core.TEMPO_CENTER_BPM = math.sqrt(mn * mx)
+
+    def _find_input_by_name(self, name):
+        """sounddevice-Index zum gespeicherten Geraetenamen; None wenn weg."""
+        try:
+            for idx, _label in core._list_io_devices('in'):
+                if sd.query_devices(idx)['name'] == name:
+                    return idx
+        except Exception:
+            pass
+        return None
+
+    def _find_saved_source(self, cfg):
+        """Gespeicherte Quelle aufloesen: ('input', sd-Index) oder
+        ('loopback', Lautsprechername); None, wenn nicht mehr vorhanden."""
+        name = cfg.get("input_name")
+        if cfg.get("input_type", "input") == "loopback":
+            if sc is None:
+                return None
+            try:
+                for sp in sc.all_speakers():
+                    if sp.name == name:
+                        return ("loopback", name)
+            except Exception:
+                pass
+            return None
+        idx = self._find_input_by_name(name)
+        return None if idx is None else ("input", idx)
+
+    # ------------------------------------------------------------------
+    # Oberflaeche: Hauptbildschirm
+    # ------------------------------------------------------------------
+    def _build_main_frame(self):
+        f = tk.Frame(self.root, bg=COL_BG)
+        self.main_frame = f
+        f.columnconfigure(0, weight=1)
+        for r in (1, 4, 7):                   # Abstandshalter-Zeilen
+            f.rowconfigure(r, weight=1)
+
+        top = tk.Frame(f, bg=COL_BG)
+        top.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 0))
+        self.src_label = tk.Label(top, text="", font=self.f_small,
+                                  bg=COL_BG, fg=COL_MUTED, anchor="w")
+        self.src_label.pack(side="left")
+        self.status_label = tk.Label(top, text="", font=self.f_small,
+                                     bg=COL_BG, fg=COL_MUTED, anchor="e")
+        self.status_label.pack(side="right")
+
+        self.bpm_label = tk.Label(f, text="—", font=self.f_bpm,
+                                  bg=COL_BG, fg=COL_FG)
+        self.bpm_label.grid(row=2, column=0)
+        tk.Label(f, text="BPM", font=self.f_cap,
+                 bg=COL_BG, fg=COL_MUTED).grid(row=3, column=0)
+
+        keyrow = tk.Frame(f, bg=COL_BG)
+        keyrow.grid(row=5, column=0)
+        self.key_label = tk.Label(keyrow, text="—", font=self.f_key,
+                                  bg=COL_BG, fg=COL_ACCENT)
+        self.key_label.pack(side="left", anchor="s")
+        self.key_par_label = tk.Label(keyrow, text="", font=self.f_key_par,
+                                      bg=COL_BG, fg=COL_MUTED)
+        self.key_par_label.pack(side="left", anchor="s", pady=(0, 8))
+        tk.Label(f, text="TONART", font=self.f_cap,
+                 bg=COL_BG, fg=COL_MUTED).grid(row=6, column=0)
+
+        lvl = tk.Frame(f, bg=COL_BG)
+        lvl.grid(row=8, column=0, sticky="ew", padx=24, pady=(0, 4))
+        tk.Label(lvl, text="PEGEL", font=self.f_small,
+                 bg=COL_BG, fg=COL_MUTED).pack(side="left")
+        self.db_label = tk.Label(lvl, text="-60 dB", font=self.f_small,
+                                 bg=COL_BG, fg=COL_MUTED, width=7, anchor="e")
+        self.db_label.pack(side="right")
+        self.level_canvas = tk.Canvas(lvl, height=12, bg=COL_BAR_BG,
+                                      highlightthickness=0, bd=0)
+        self.level_canvas.pack(side="left", fill="x", expand=True, padx=12)
+        self.level_rect = self.level_canvas.create_rectangle(
+            0, 0, 0, 14, fill=COL_OK, width=0)
+
+        btns = tk.Frame(f, bg=COL_BG)
+        btns.grid(row=9, column=0, sticky="ew", padx=24, pady=(0, 12))
+        self._small_button(btns, "Beenden", self.quit_app).pack(side="right")
+        self._small_button(btns, "Einstellungen",
+                           self.on_settings).pack(side="right", padx=(0, 8))
+
+    def _small_button(self, parent, text, cmd):
+        return tk.Button(parent, text=text, command=cmd, font=self.f_small,
+                         bg=COL_BG, fg=COL_MUTED, activebackground=COL_SURFACE,
+                         activeforeground=COL_FG, bd=0, padx=10, pady=4,
+                         highlightthickness=0, cursor="hand2")
+
+    # ------------------------------------------------------------------
+    # Oberflaeche: Auswahlbildschirm
+    # ------------------------------------------------------------------
+    def _build_setup_frame(self):
+        f = tk.Frame(self.root, bg=COL_BG)
+        self.setup_frame = f
+
+        tk.Label(f, text="Einstellungen", font=self.f_h1,
+                 bg=COL_BG, fg=COL_FG).pack(pady=(20, 12))
+
+        body = tk.Frame(f, bg=COL_BG)
+        body.pack(fill="both", expand=True, padx=24)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        tk.Label(body, text="Audio-Eingang", font=self.f_cap, bg=COL_BG,
+                 fg=COL_MUTED, anchor="w").grid(row=0, column=0,
+                                                sticky="w", pady=(0, 6))
+        tk.Label(body, text="MIDI-Ausgang", font=self.f_cap, bg=COL_BG,
+                 fg=COL_MUTED, anchor="w").grid(row=0, column=1,
+                                                sticky="w", padx=(16, 0),
+                                                pady=(0, 6))
+        kw = dict(font=self.f_list, bg=COL_SURFACE, fg=COL_FG,
+                  selectbackground="#1D9E75", selectforeground="#04342C",
+                  highlightthickness=0, bd=0, activestyle="none",
+                  exportselection=False)
+        self.lb_in = tk.Listbox(body, **kw)
+        self.lb_in.grid(row=1, column=0, sticky="nsew")
+        self.lb_midi = tk.Listbox(body, **kw)
+        self.lb_midi.grid(row=1, column=1, sticky="nsew", padx=(16, 0))
+
+        opts = tk.Frame(f, bg=COL_BG)
+        opts.pack(fill="x", padx=24, pady=(12, 0))
+        self.var_dec = tk.BooleanVar()
+        self.var_beat = tk.BooleanVar()
+        ck = dict(bg=COL_BG, fg=COL_FG, selectcolor=COL_SURFACE,
+                  activebackground=COL_BG, activeforeground=COL_FG,
+                  highlightthickness=0, font=self.f_small, cursor="hand2")
+        tk.Checkbutton(opts, text="BPM mit Nachkommastelle",
+                       variable=self.var_dec, **ck).pack(side="left")
+        tk.Checkbutton(opts, text="Beat-synchrone Clock (experimentell)",
+                       variable=self.var_beat, **ck).pack(side="left",
+                                                          padx=(16, 0))
+        rng = tk.Frame(opts, bg=COL_BG)
+        rng.pack(side="right")
+        tk.Label(rng, text="BPM-Bereich", font=self.f_small, bg=COL_BG,
+                 fg=COL_MUTED).pack(side="left", padx=(0, 6))
+        ent = dict(font=self.f_small, bg=COL_SURFACE, fg=COL_FG, width=4,
+                   bd=0, insertbackground=COL_FG, justify="center")
+        self.ent_min = tk.Entry(rng, **ent)
+        self.ent_min.pack(side="left", ipady=3)
+        tk.Label(rng, text="–", font=self.f_small, bg=COL_BG,
+                 fg=COL_MUTED).pack(side="left", padx=4)
+        self.ent_max = tk.Entry(rng, **ent)
+        self.ent_max.pack(side="left", ipady=3)
+
+        self.err_label = tk.Label(f, text="", font=self.f_small,
+                                  bg=COL_BG, fg=COL_WARN)
+        self.err_label.pack(fill="x", padx=24, pady=(8, 0))
+
+        bottom = tk.Frame(f, bg=COL_BG)
+        bottom.pack(fill="x", padx=24, pady=(6, 16))
+        tk.Label(bottom, text="F11: Vollbild   Esc: Beenden",
+                 font=self.f_small, bg=COL_BG,
+                 fg=COL_MUTED).pack(side="left")
+        tk.Button(bottom, text="Start", command=self.on_setup_start,
+                  font=self.f_btn, bg="#1D9E75", fg="#04342C",
+                  activebackground=COL_OK, activeforeground="#04342C",
+                  bd=0, padx=28, pady=8, highlightthickness=0,
+                  cursor="hand2").pack(side="right")
+        tk.Button(bottom, text="Aktualisieren", command=self._populate_setup,
+                  font=self.f_btn, bg=COL_SURFACE, fg=COL_FG,
+                  activebackground=COL_SURF_HI, activeforeground=COL_FG,
+                  bd=0, padx=16, pady=8, highlightthickness=0,
+                  cursor="hand2").pack(side="right", padx=(0, 10))
+
+    def _populate_setup(self):
+        cfg = load_config()
+        cfg_type = cfg.get("input_type", "input")
+        # Quellenliste: echte Eingaenge + (nur Windows) Loopback der Ausgaenge.
+        # Eintrag: (typ, kennung, speichername, anzeigetext)
+        self.sources = []
+        for idx, label in core._list_io_devices('in'):
+            try:
+                name = sd.query_devices(idx)['name']
+            except Exception:
+                name = ""
+            self.sources.append(("input", idx, name, f"  {label}"))
+        if sc is not None:
+            default_name = ""
+            try:
+                default_name = sc.default_speaker().name
+            except Exception:
+                pass
+            try:
+                for sp in sc.all_speakers():
+                    tag = "  <- Standard" if sp.name == default_name else ""
+                    self.sources.append(
+                        ("loopback", sp.name, sp.name,
+                         f"  Loopback: {sp.name}{tag}"))
+            except Exception:
+                pass
+        self.lb_in.delete(0, "end")
+        sel_in = 0
+        for n, (kind, _ident, name, text) in enumerate(self.sources):
+            self.lb_in.insert("end", text)
+            if kind == cfg_type and name == cfg.get("input_name"):
+                sel_in = n
+        if self.sources:
+            self.lb_in.selection_set(sel_in)
+            self.lb_in.see(sel_in)
+
+        self.midi_names = mido.get_output_names()
+        self.lb_midi.delete(0, "end")
+        self.lb_midi.insert("end", "  Kein MIDI (nur Anzeige)")
+        sel_midi = 0
+        for n, name in enumerate(self.midi_names):
+            self.lb_midi.insert("end", f"  {name}")
+            if name == cfg.get("midi_output"):
+                sel_midi = n + 1
+        self.lb_midi.selection_set(sel_midi)
+        self.lb_midi.see(sel_midi)
+
+        self.var_dec.set(self.opt_bpm_decimal)
+        self.var_beat.set(self.opt_beat_sync)
+        self.ent_min.delete(0, "end")
+        self.ent_min.insert(0, f"{self.opt_min_bpm:.0f}")
+        self.ent_max.delete(0, "end")
+        self.ent_max.insert(0, f"{self.opt_max_bpm:.0f}")
+
+    # ------------------------------------------------------------------
+    # Bildschirm-Wechsel
+    # ------------------------------------------------------------------
+    def show_setup(self, error=""):
+        self.main_frame.pack_forget()
+        self._populate_setup()
+        self.err_label.config(text=error)
+        self.setup_frame.pack(fill="both", expand=True)
+
+    def show_main(self):
+        self.setup_frame.pack_forget()
+        self.main_frame.pack(fill="both", expand=True)
+
+    def on_settings(self):
+        self.stop_session()
+        self.show_setup()
+
+    def on_setup_start(self):
+        sel = self.lb_in.curselection()
+        if not sel or not self.sources:
+            self.err_label.config(text="Bitte eine Audioquelle waehlen.")
+            return
+        kind, ident, name, _text = self.sources[sel[0]]
+        msel = self.lb_midi.curselection()
+        midi = None
+        if msel and msel[0] > 0:
+            midi = self.midi_names[msel[0] - 1]
+        try:
+            mn = float(self.ent_min.get().replace(",", "."))
+            mx = float(self.ent_max.get().replace(",", "."))
+        except ValueError:
+            self.err_label.config(text="BPM-Bereich: bitte Zahlen eingeben.")
+            return
+        if not (30.0 <= mn < mx <= 300.0):
+            self.err_label.config(
+                text="BPM-Bereich ungueltig (30 bis 300, von < bis).")
+            return
+        save_config({"input_type": kind, "input_name": name,
+                     "midi_output": midi or "",
+                     "bpm_dezimal": bool(self.var_dec.get()),
+                     "beat_sync": bool(self.var_beat.get()),
+                     "min_bpm": mn, "max_bpm": mx})
+        self._load_options()
+        self.start_session((kind, ident), midi)
+
+    # ------------------------------------------------------------------
+    # Sitzung: Aufnahme + Clock starten/stoppen
+    # ------------------------------------------------------------------
+    def start_session(self, src, midi_name):
+        """src: ('input', sd-Index) oder ('loopback', Lautsprechername)."""
+        self.show_main()
+        self.status_override = "INITIALISIERE ANALYSE …"
+        self.src_label.config(text="")
+        threading.Thread(target=self._warmup_then_begin,
+                         args=(src, midi_name), daemon=True).start()
+
+    def _warmup_then_begin(self, src, midi_name):
+        # librosa/numba einmalig aufwaermen (erster Aufruf kompiliert sonst
+        # mitten im Betrieb und blockiert die Analyse mehrere Sekunden).
+        if not self.warmed:
+            try:
+                w = np.zeros(int(core.ANALYSIS_SR * core.WINDOW_SECONDS),
+                             dtype=np.float32)
+                w[::core.ANALYSIS_SR // 4] = 0.5
+                core.estimate_tempo(w, core.ANALYSIS_SR)
+                core.chroma_pcp(w, core.ANALYSIS_SR)
+            except Exception:
+                pass
+            self.warmed = True
+        if not self.app_stop.is_set():
+            self._begin_args = (src, midi_name)
+
+    def _begin(self, src, midi_name):
+        if self.app_stop.is_set():
+            return
+        kind, ident = src
+        if kind == "loopback":
+            if sc is None:
+                self.status_override = None
+                self.show_setup(error="Loopback braucht das Paket 'soundcard'"
+                                      " (pip install soundcard).")
+                return
+            try:
+                source_arg = sc.get_microphone(id=str(ident),
+                                               include_loopback=True)
+            except Exception as e:
+                self.status_override = None
+                self.show_setup(error=f"Loopback fehlgeschlagen: {e}")
+                return
+            mode = "2"
+            sr = float(core.LOOPBACK_SR)
+            name = f"Loopback {ident}"
+        else:
+            mode = "1"
+            source_arg = ident
+            try:
+                sr = float(core.pick_input_samplerate(ident))
+            except Exception:
+                sr = float(core.INPUT_SR)
+            try:
+                name = sd.query_devices(ident)['name']
+            except Exception:
+                name = f"Geraet #{ident}"
+
+        with self.shared.lock:
+            self.shared.capture_sr = sr
+            self.shared.have_estimate = False
+            self.shared.raw_bpm = 0.0
+            self.shared.key = "—"
+            self.shared.key_confident = False
+            self.shared.beat_sync = self.opt_beat_sync
+        core.drain_queue(self.audio_q)
+
+        try:
+            self.stream, self.cap_thread, self.cap_stop = core.start_capture(
+                mode, source_arg, sr, self.audio_q, None, self.shared)
+        except Exception as e:
+            self.status_override = None
+            self.show_setup(error=f"Quelle konnte nicht geoeffnet werden: {e}")
+            return
+
+        self.midi_out = None
+        self.midi_name = midi_name
+        if midi_name:
+            try:
+                self.midi_out = mido.open_output(midi_name)
+            except Exception as e:
+                core.stop_capture(self.stream, self.cap_thread, self.cap_stop)
+                self.stream = self.cap_thread = self.cap_stop = None
+                self.status_override = None
+                self.show_setup(error=f"MIDI-Ausgang fehlgeschlagen: {e}")
+                return
+
+        self.clock_stop = threading.Event()
+        self.clock_thread = threading.Thread(
+            target=core.clock_worker,
+            args=(self.shared, self.midi_out, self.clock_stop), daemon=True)
+        self.clock_thread.start()
+
+        if self.analysis_thread is None:
+            self.analysis_thread = threading.Thread(
+                target=core.analysis_worker_safe,
+                args=(self.shared, self.audio_q, self.app_stop), daemon=True)
+            self.analysis_thread.start()
+
+        if len(name) > 38:
+            name = name[:37] + "…"
+        self.src_label.config(text=f"QUELLE: {name}  @ {int(sr)} Hz")
+        self.status_override = None
+
+    def stop_session(self):
+        self._begin_args = None
+        self.status_override = None
+        if (self.stream is not None or self.cap_thread is not None
+                or self.cap_stop is not None):
+            core.stop_capture(self.stream, self.cap_thread, self.cap_stop)
+            self.stream = self.cap_thread = self.cap_stop = None
+        if self.clock_stop is not None:
+            self.clock_stop.set()
+        if self.clock_thread is not None:
+            self.clock_thread.join(timeout=1.5)
+            self.clock_thread = self.clock_stop = None
+        if self.midi_out is not None:
+            try:
+                self.midi_out.close()
+            except Exception:
+                pass
+            self.midi_out = None
+        core.drain_queue(self.audio_q)
+        with self.shared.lock:
+            self.shared.have_estimate = False
+            self.shared.raw_bpm = 0.0
+            self.shared.key = "—"
+
+    def quit_app(self):
+        try:
+            self.stop_session()
+        except Exception:
+            pass
+        self.app_stop.set()
+        if self.analysis_thread is not None:
+            self.analysis_thread.join(timeout=1.0)
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Anzeige-Aktualisierung (~6x pro Sekunde)
+    # ------------------------------------------------------------------
+    def _tick(self):
+        if self._begin_args is not None:
+            args = self._begin_args
+            self._begin_args = None
+            self._begin(*args)
+
+        if (self.cap_stop is not None and self.cap_stop.is_set()
+                and (self.stream is not None or self.cap_thread is not None)):
+            # Aufnahme hat sich selbst beendet (z. B. Geraet getrennt)
+            core.log_message("[GUI: Aufnahme unterbrochen, zurueck zum Setup]")
+            self.stop_session()
+            self.show_setup(error="Aufnahme wurde unterbrochen "
+                                  "(Geraet getrennt?).")
+
+        # Watchdog: sollte der Analyse-Thread trotz Absturzschutz sterben,
+        # wird er hier neu gestartet, statt dass die Anzeige stumm einfriert.
+        if (self.analysis_thread is not None
+                and not self.analysis_thread.is_alive()
+                and not self.app_stop.is_set()):
+            core.log_message("[GUI-Watchdog: Analyse-Thread tot, Neustart]")
+            self.analysis_thread = threading.Thread(
+                target=core.analysis_worker_safe,
+                args=(self.shared, self.audio_q, self.app_stop), daemon=True)
+            self.analysis_thread.start()
+
+        with self.shared.lock:
+            bpm = self.shared.target_bpm
+            key = self.shared.key
+            key_conf = self.shared.key_confident
+            level = self.shared.level
+            level_time = self.shared.level_time
+            have = self.shared.have_estimate
+
+        age = core.time.perf_counter() - level_time
+        if age > 0.3:
+            level *= core.math.exp(-(age - 0.3) / 0.4)
+        db, _ = core.level_bar(level)
+
+        # BPM: gross und hell, sobald eine Schaetzung da ist; davor ein
+        # dezenter kleiner Platzhalter (das riesige "—" sah wie ein
+        # Renderfehler aus). Nachkommastelle nur, wenn als Option gewaehlt.
+        if have:
+            if not self._bpm_big:
+                self.bpm_label.config(font=self.f_bpm, fg=COL_FG)
+                self._bpm_big = True
+            self.bpm_label.config(
+                text=f"{bpm:.1f}" if self.opt_bpm_decimal else f"{bpm:.0f}")
+        else:
+            if self._bpm_big:
+                self.bpm_label.config(font=self.f_key, fg=COL_MUTED)
+                self._bpm_big = False
+            self.bpm_label.config(text="—")
+        # Tonart: gedimmt, solange die Erkennung noch unsicher ist
+        self.key_label.config(text=key,
+                              fg=COL_ACCENT if key_conf else COL_MUTED)
+        par = parallel_key(key)
+        self.key_par_label.config(text=f"   {par}" if par else "")
+        self.db_label.config(text=f"{db:4.0f} dB")
+
+        w = self.level_canvas.winfo_width()
+        frac = max(0.0, min(1.0, (db + 60.0) / 60.0))
+        self.level_canvas.coords(self.level_rect, 0, 0, int(w * frac), 14)
+
+        running = self.stream is not None or self.cap_thread is not None
+        if self.status_override:
+            self.status_label.config(text=self.status_override, fg=COL_MUTED)
+        elif not running:
+            self.status_label.config(text="", fg=COL_MUTED)
+        elif db <= -55.0:
+            self.status_label.config(text="KEIN SIGNAL", fg=COL_WARN)
+        elif not have:
+            self.status_label.config(text="ANALYSIERE …", fg=COL_MUTED)
+        elif self.midi_out is not None:
+            self.status_label.config(text="● MIDI-CLOCK LAEUFT", fg=COL_OK)
+        else:
+            self.status_label.config(text="OHNE MIDI", fg=COL_MUTED)
+
+        self.root.after(150, self._tick)
+
+    # ------------------------------------------------------------------
+    # Fenster-Verwaltung
+    # ------------------------------------------------------------------
+    def set_fullscreen(self, on):
+        self.fullscreen = on
+        self.root.attributes("-fullscreen", on)
+        # Im Kiosk-Betrieb den Mauszeiger ausblenden
+        self.root.config(cursor="none" if on else "")
+
+    def _on_resize(self, event):
+        if event.widget is not self.root:
+            return
+        h = event.height
+        if abs(h - self._last_height) < 8:
+            return
+        self._last_height = h
+        self.f_bpm.configure(size=-max(60, int(h * 0.28)))
+        self.f_key.configure(size=-max(28, int(h * 0.11)))
+        self.f_key_par.configure(size=-max(15, int(h * 0.045)))
+        self.f_cap.configure(size=-max(12, int(h * 0.028)))
+        self.f_small.configure(size=-max(12, int(h * 0.024)))
+
+
+def main():
+    fullscreen = sys.platform.startswith("linux")
+    if "--windowed" in sys.argv:
+        fullscreen = False
+    if "--fullscreen" in sys.argv:
+        fullscreen = True
+    force_setup = "--setup" in sys.argv
+
+    try:
+        mido.set_backend('mido.backends.rtmidi')
+    except Exception:
+        pass
+
+    root = tk.Tk()
+    DisplayApp(root, fullscreen, force_setup)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

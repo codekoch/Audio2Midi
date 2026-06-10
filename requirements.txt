@@ -1,0 +1,12 @@
+# Audio2Midi -- Abhaengigkeiten
+# Installation:  pip install -r requirements.txt
+numpy
+librosa
+soundfile
+sounddevice
+mido
+python-rtmidi
+# Nur Windows: Loopback (Wiedergabe mithoeren). Auf dem Raspberry Pi
+# unnoetig -- dort erscheinen die PipeWire/Pulse-Monitor-Quellen als
+# normale Eingaenge.
+soundcard; sys_platform == 'win32'
