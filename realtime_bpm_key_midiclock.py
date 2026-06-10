@@ -181,6 +181,9 @@ class Shared:
         self.level_time = 0.0     # perf_counter des letzten Pegel-Updates
         self.capture_sr = float(ANALYSIS_SR)  # aktuelle Aufnahmerate (live aenderbar)
         self.have_estimate = False
+        self.hold = False         # Analyse eingefroren (lange Breaks):
+                                  # Ergebnisse bleiben stehen, kein
+                                  # Stille-Reset, Clock laeuft konstant
         self.beat_sync = False    # Clock auf den Beat einrasten (GUI-Option)
         self.beat_anchor = 0.0    # perf_counter-Zeit eines erkannten Beats
         self.beat_period = 0.0    # Beat-Abstand in Sekunden
@@ -448,6 +451,19 @@ def analysis_worker(shared, audio_q, stop_event):
                 pass
         except queue.Empty:
             blocks = []
+
+        # ---- Analyse bewusst angehalten (langer Break)? ----
+        # Bloecke verwerfen, Ergebnisse/Clock unveraendert lassen und den
+        # Stille-Reset unterdruecken. Der Audio-Puffer wird geleert, damit
+        # nach dem Fortsetzen nicht Altes mit Neuem verklebt wird --
+        # die BPM-/Tonart-Historie bleibt erhalten (gleiches Stueck).
+        with shared.lock:
+            hold = shared.hold
+        if hold:
+            buf = np.zeros(0, dtype=np.float32)
+            res_tail = np.zeros(0, dtype=np.float32)
+            silent_since = None
+            continue
 
         # ---- Stille/Pause erkennen -> Analyse zuruecksetzen ----
         # (Pegel kommt Producer-seitig; bei stehengebliebenen Bloecken klingt er ab.)

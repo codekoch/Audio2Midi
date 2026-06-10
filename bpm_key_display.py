@@ -123,6 +123,7 @@ class DisplayApp:
         root.protocol("WM_DELETE_WINDOW", self.quit_app)
         root.bind("<F11>", lambda e: self.set_fullscreen(not self.fullscreen))
         root.bind("<Escape>", lambda e: self.quit_app())
+        root.bind("<space>", lambda e: self.toggle_hold())
         root.bind("<Configure>", self._on_resize)
 
         # ---- Laufzeit-Zustand (Analyse-Kern) ----
@@ -144,6 +145,7 @@ class DisplayApp:
                                               # (Tk darf nur im Main-Thread laufen)
         self._last_height = 0
         self._bpm_big = True                  # BPM-Label gerade gross/aktiv?
+        self.hold = False                     # Analyse eingefroren?
         self._load_options()                  # Optionen + BPM-Bereich anwenden
 
         # ---- Schriften (Groesse wird bei Resize angepasst) ----
@@ -277,6 +279,14 @@ class DisplayApp:
 
         btns = tk.Frame(f, bg=COL_BG)
         btns.grid(row=9, column=0, sticky="ew", padx=24, pady=(0, 12))
+        self.hold_btn = tk.Button(btns, text="Analyse anhalten",
+                                  command=self.toggle_hold,
+                                  font=self.f_small, bg=COL_SURFACE,
+                                  fg=COL_FG, activebackground=COL_SURF_HI,
+                                  activeforeground=COL_FG, bd=0, padx=16,
+                                  pady=6, highlightthickness=0, takefocus=0,
+                                  cursor="hand2")
+        self.hold_btn.pack(side="left")
         self._small_button(btns, "Beenden", self.quit_app).pack(side="right")
         self._small_button(btns, "Einstellungen",
                            self.on_settings).pack(side="right", padx=(0, 8))
@@ -435,6 +445,32 @@ class DisplayApp:
         self.stop_session()
         self.show_setup()
 
+    def _set_hold(self, on):
+        """Analyse einfrieren/fortsetzen (Button-Optik inklusive)."""
+        with self.shared.lock:
+            self.shared.hold = on
+        self.hold = on
+        if on:
+            self.hold_btn.config(text="Analyse fortsetzen", bg=COL_WARN,
+                                 fg="#412402", activebackground="#FAC775",
+                                 activeforeground="#412402")
+        else:
+            self.hold_btn.config(text="Analyse anhalten", bg=COL_SURFACE,
+                                 fg=COL_FG, activebackground=COL_SURF_HI,
+                                 activeforeground=COL_FG)
+
+    def toggle_hold(self):
+        """Fuer Stuecke mit langen Breaks: Ergebnisse einfrieren, die
+        MIDI-Clock laeuft konstant weiter, Stille loest keinen Reset aus."""
+        if self.stream is None and self.cap_thread is None:
+            return                  # keine laufende Sitzung
+        if not self.hold:
+            with self.shared.lock:
+                have = self.shared.have_estimate
+            if not have:
+                return              # noch nichts zu halten
+        self._set_hold(not self.hold)
+
     def on_setup_start(self):
         sel = self.lb_in.curselection()
         if not sel or not self.sources:
@@ -571,6 +607,8 @@ class DisplayApp:
     def stop_session(self):
         self._begin_args = None
         self.status_override = None
+        if self.hold:
+            self._set_hold(False)
         if (self.stream is not None or self.cap_thread is not None
                 or self.cap_stop is not None):
             core.stop_capture(self.stream, self.cap_thread, self.cap_stop)
@@ -676,6 +714,10 @@ class DisplayApp:
             self.status_label.config(text=self.status_override, fg=COL_MUTED)
         elif not running:
             self.status_label.config(text="", fg=COL_MUTED)
+        elif self.hold:
+            self.status_label.config(
+                text="ANGEHALTEN · CLOCK LAEUFT" if self.midi_out is not None
+                else "ANALYSE ANGEHALTEN", fg=COL_WARN)
         elif db <= -55.0:
             self.status_label.config(text="KEIN SIGNAL", fg=COL_WARN)
         elif not have:

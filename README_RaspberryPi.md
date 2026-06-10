@@ -75,6 +75,12 @@ python bpm_key_display.py
   unsicher ist (kleiner Vorsprung vor dem zweitbesten Kandidaten), und
   leuchtet erst bei klarer Entscheidung voll auf. In der Konsolen-Version
   markiert ein `?` dahinter dieselbe Unsicherheit.
+- **Analyse anhalten** (Button unten links bzw. Leertaste): friert die
+  aktuellen Ergebnisse bewusst ein -- für Stücke mit langen Breaks. Die
+  MIDI-Clock läuft konstant im gehaltenen Tempo weiter, und die Stille
+  des Breaks löst keinen Reset aus. Erneutes Drücken setzt die Analyse
+  fort (die Historie des Stücks bleibt dabei erhalten). Der Status zeigt
+  währenddessen „ANGEHALTEN · CLOCK LAEUFT".
 
 ## Diagnose und Wartung
 
