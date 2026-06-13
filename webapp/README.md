@@ -34,6 +34,12 @@ python serve.py
 
 Dann im Browser **http://localhost:8000** öffnen.
 
+> ⚠️ **Nicht die `index.html` direkt doppelklicken!** Wird die Seite als
+> `file://…/index.html` geöffnet, behandelt der Browser sie als Origin
+> „null" und **blockiert AudioWorklets** (`blob:null` → „Unable to load a
+> worklet's module"). Die Adressleiste muss `http://localhost:8000` zeigen,
+> nicht `file://`. Web Audio braucht zwingend einen `http`-/`https`-Origin.
+
 `serve.py` liefert `.js` zuverlässig mit JavaScript-MIME-Typ aus (manche
 Systeme mappen `.js` sonst auf `text/plain`, was das Laden von AudioWorklets
 verhindert) und schaltet Caching ab, damit Änderungen sofort ankommen.

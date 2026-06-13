@@ -79,6 +79,7 @@ button#startBtn {
   cursor: pointer;
 }
 button#startBtn.stop { background: var(--warn); color: #412402; }
+button#startBtn:disabled { opacity: .4; cursor: default; }
 
 main {
   flex: 1;

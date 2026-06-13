@@ -430,16 +430,30 @@ elInput.addEventListener('focus', () => { if (!inputsUnlocked) unlockInputs(); }
 elMidi.addEventListener('focus', initMidi);
 
 window.addEventListener('DOMContentLoaded', () => {
-  if (!window.isSecureContext) {
-    setHint('Diese Seite muss ueber http://localhost oder HTTPS laufen -- '
-          + 'sonst sind Mikrofon und MIDI gesperrt. Siehe README.', true);
-  }
   elMidi.add(new Option('Kein MIDI (Liste öffnen zum Verbinden)', ''));
   refreshAudioInputs();
   setBpmText('—');
-  setStatus('bereit');
   updateLevel(-60);
-  setHint('„Eingänge laden“ klicken, um alle Audio-Eingänge mit Namen zu sehen. '
-        + 'MIDI-Liste öffnen, um den MIDI-Ausgang zu wählen.');
+
+  if (location.protocol === 'file:') {
+    // Direkt geoeffnete Datei (file://): der Browser behandelt das als
+    // Origin "null" und blockiert AudioWorklets (blob:null) -- die Analyse
+    // kann so nicht laufen. Es braucht zwingend einen http-Origin.
+    setStatus('NICHT ÜBER SERVER GEÖFFNET');
+    setHint('Diese Seite wurde direkt als Datei geöffnet (file://). So '
+          + 'blockiert der Browser die Audio-Analyse. Bitte im Ordner '
+          + '„webapp“ einen Server starten: python serve.py  — und dann '
+          + 'http://localhost:8000 im Browser öffnen.', true);
+    elStart.disabled = true;
+    elLoad.disabled = true;
+  } else if (!window.isSecureContext) {
+    setStatus('bereit');
+    setHint('Diese Seite muss über http://localhost oder HTTPS laufen — '
+          + 'sonst sind Mikrofon und MIDI gesperrt. Siehe README.', true);
+  } else {
+    setStatus('bereit');
+    setHint('„Eingänge laden“ klicken, um alle Audio-Eingänge mit Namen zu '
+          + 'sehen. MIDI-Liste öffnen, um den MIDI-Ausgang zu wählen.');
+  }
   requestAnimationFrame(render);
 });
