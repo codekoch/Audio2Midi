@@ -90,13 +90,4 @@ hochaufgelösten) STFT statt der CQT des Python-Projekts.
 
 ## Veröffentlichung über GitHub Pages
 
-Da alles in `index.html` steckt, genügt statisches Hosting:
-
-1. Im GitHub-Repo unter **Settings → Pages** die Quelle auf „Deploy from a
-   branch", Branch `master`, Ordner `/ (root)` setzen.
-2. Nach dem Build ist die App erreichbar unter
-   `https://<benutzer>.github.io/<repo>/webapp/`.
-3. Diesen Link oben in dieser README (und in der Haupt-README) eintragen.
-
-> Web MIDI und Mikrofon brauchen einen sicheren Kontext – über `https://…`
-> (GitHub Pages liefert HTTPS) ist das erfüllt.
+- Teste die Webversion direkt unter <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
