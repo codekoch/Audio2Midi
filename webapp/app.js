@@ -171,26 +171,41 @@ async function unlockInputs() {
   }
 }
 
-// AudioWorklet-Modul laden -- robust gegen falsch konfigurierten MIME-Typ.
-// addModule() verlangt einen JavaScript-MIME-Typ; manche lokalen Server
-// (z. B. python http.server unter Windows, je nach Registry) liefern .js
-// aber als text/plain o. ae. aus und addModule lehnt dann ab. Als Ausweg die
-// Datei selbst holen und als Blob mit korrektem MIME-Typ nachladen.
-async function addWorkletModule(ctx) {
-  try {
-    await ctx.audioWorklet.addModule('capture-worklet.js');
-    return;
-  } catch (e) {
-    const resp = await fetch('capture-worklet.js');
-    if (!resp.ok) throw e;
-    const code = await resp.text();
-    const url = URL.createObjectURL(
-      new Blob([code], { type: 'application/javascript' }));
-    try {
-      await ctx.audioWorklet.addModule(url);
-    } finally {
-      URL.revokeObjectURL(url);
+// AudioWorklet-Prozessor: mischt den Eingang auf Mono und schickt dem
+// Hauptthread fortlaufend Bloecke von genau HOP_SIZE Samples. Der Code wird
+// direkt eingebettet und zur Laufzeit aus einem Blob geladen -- so haengt das
+// Laden weder an einer separaten Datei noch am MIME-Typ des Servers (manche
+// lokalen Server liefern .js falsch aus, dann scheitert addModule). Gleiches
+// Muster wie der Scheduler-Worker in midiclock.js. HOP muss zu HOP_SIZE in
+// tempo.js passen (512).
+const WORKLET_CODE = `
+const HOP = 512;
+class CaptureProcessor extends AudioWorkletProcessor {
+  constructor() { super(); this._buf = new Float32Array(HOP); this._idx = 0; }
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || input.length === 0) return true;
+    const chans = input.length;
+    const n = input[0].length;
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let c = 0; c < chans; c++) s += input[c][i];
+      this._buf[this._idx++] = s / chans;
+      if (this._idx >= HOP) { this.port.postMessage(this._buf.slice(0)); this._idx = 0; }
     }
+    return true;
+  }
+}
+registerProcessor('capture-processor', CaptureProcessor);
+`;
+
+async function addWorkletModule(ctx) {
+  const url = URL.createObjectURL(
+    new Blob([WORKLET_CODE], { type: 'application/javascript' }));
+  try {
+    await ctx.audioWorklet.addModule(url);
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 

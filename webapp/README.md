@@ -104,10 +104,9 @@ für den Live-Betrieb sollte der Tab aber sichtbar bleiben.
 |-------|-------|
 | `index.html` | Oberfläche |
 | `style.css` | dunkles Thema (an die Kiosk-Anzeige angelehnt) |
-| `capture-worklet.js` | AudioWorklet: Mono-Downmix, liefert 512-Sample-Blöcke |
 | `tempo.js` | FFT, Onset-Hüllkurve, Autokorrelation, BPM-Schätzung |
 | `midiclock.js` | Lookahead-Scheduler + zeitgestempelte MIDI-Clock |
-| `app.js` | Glue: Audio/MIDI einrichten, Analyse takten, Anzeige |
+| `app.js` | Glue: Audio/MIDI einrichten, Analyse takten, Anzeige; enthält den AudioWorklet (Mono-Downmix, 512-Sample-Blöcke) als eingebetteten Blob |
 
 Die Stellschrauben (Fensterlänge, Prior, Slew-Rate, Totband …) stehen als
 Konstanten am Kopf von `tempo.js`, `midiclock.js` und `app.js` und sind
