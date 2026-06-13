@@ -9,21 +9,39 @@ Tonart, Akkorde, Loopback und die Kiosk-Oberfläche bleiben den
 Python-Versionen vorbehalten; diese WebApp ist bewusst auf den Kern
 reduziert.
 
+Es gibt zwei Varianten:
+
+1. **Einzeldatei `audio2midi-standalone.html`** – einfach im Browser öffnen
+   (Doppelklick), **kein Server nötig**. Empfohlen für den schnellen Einsatz.
+2. **Server-Variante (`index.html` + `*.js`)** – nutzt einen modernen
+   `AudioWorklet` (Analyse im eigenen Thread), braucht aber einen lokalen
+   Server (s. unten).
+
 ## Voraussetzungen
 
 - **Browser mit Web MIDI:** Chrome, Edge oder Opera (Chromium).
   Firefox unterstützt Web MIDI nur mit Erweiterung; **Safari unterstützt es
   nicht** – dort gibt es keine MIDI-Ausgabe.
-- **Sicherer Kontext:** Mikrofon und MIDI funktionieren nur über
-  `http://localhost` oder HTTPS. Ein direkter Doppelklick auf `index.html`
-  (`file://`) reicht **nicht**.
 - **Virtueller MIDI-Port**, um eine DAW/Hardware auf demselben Rechner zu
   erreichen: Windows
   [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html),
   macOS der IAC-Treiber (Audio-MIDI-Setup), Linux ALSA/`snd-virmidi`.
   Ein USB-MIDI-Interface geht direkt.
 
-## Starten
+## Variante 1: Einzeldatei (ohne Server)
+
+**`audio2midi-standalone.html` im Browser öffnen** – Doppelklick im
+Datei-Explorer oder im Browser per `Strg`+`O`. Fertig, kein Server.
+
+Diese Datei verwendet einen `ScriptProcessorNode` statt des `AudioWorklet`:
+etwas älter, lädt aber kein Modul nach und läuft daher auch direkt von
+`file://` (wo der Browser Worklets sperrt). Für diese leichte Analyse ist das
+völlig ausreichend; die MIDI-Clock ist davon ohnehin unabhängig.
+
+Beim Start fragt der Browser nach Mikrofon-Zugriff. Bedienung wie unten
+(„Eingänge laden" → Eingang wählen, MIDI-Liste öffnen → Port wählen, Start).
+
+## Variante 2: Server (AudioWorklet)
 
 Im Ordner `webapp/` den mitgelieferten kleinen Server starten:
 
@@ -113,11 +131,13 @@ für den Live-Betrieb sollte der Tab aber sichtbar bleiben.
 
 | Datei | Zweck |
 |-------|-------|
-| `index.html` | Oberfläche |
+| `audio2midi-standalone.html` | **Einzeldatei** (Variante 1): alles inline, `ScriptProcessorNode`, ohne Server lauffähig |
+| `index.html` | Oberfläche der Server-Variante (Variante 2) |
 | `style.css` | dunkles Thema (an die Kiosk-Anzeige angelehnt) |
 | `tempo.js` | FFT, Onset-Hüllkurve, Autokorrelation, BPM-Schätzung |
 | `midiclock.js` | Lookahead-Scheduler + zeitgestempelte MIDI-Clock |
 | `app.js` | Glue: Audio/MIDI einrichten, Analyse takten, Anzeige; enthält den AudioWorklet (Mono-Downmix, 512-Sample-Blöcke) als eingebetteten Blob |
+| `serve.py` | kleiner Server für Variante 2 (korrekter JS-MIME, no-cache) |
 
 Die Stellschrauben (Fensterlänge, Prior, Slew-Rate, Totband …) stehen als
 Konstanten am Kopf von `tempo.js`, `midiclock.js` und `app.js` und sind

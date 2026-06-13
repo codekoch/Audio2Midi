@@ -101,8 +101,10 @@ hartes Ausschalten) und Performance-Tipps stehen in
 
 Eine schlanke Browser-Variante ohne Installation liegt in
 [webapp/](webapp/): nur Tempo-Erkennung mit stabiler MIDI-Clock über die
-Web Audio und Web MIDI API (Chrome/Edge, lokal über `localhost` ausführen).
-Details in [webapp/README.md](webapp/README.md).
+Web Audio und Web MIDI API (Chrome/Edge). Am einfachsten die Einzeldatei
+[webapp/audio2midi-standalone.html](webapp/audio2midi-standalone.html)
+direkt im Browser öffnen – kein Server nötig. Details und die Server-Variante
+(AudioWorklet) in [webapp/README.md](webapp/README.md).
 
 ## Wie es funktioniert
 
