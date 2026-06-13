@@ -42,6 +42,19 @@ header .sub { color: var(--muted); font-size: 13px; }
 }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.field .row { display: flex; align-items: center; gap: 8px; }
+button.ghost {
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--surface-hi);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button.ghost:hover { background: var(--surface-hi); }
+button.ghost:disabled { opacity: .5; cursor: default; }
 select, input[type="number"] {
   background: var(--surface);
   color: var(--fg);
@@ -83,6 +96,7 @@ main {
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
+.bpm.idle { color: var(--muted); opacity: .5; }   /* gedimmter Platzhalter */
 .cap { font-size: 14px; color: var(--muted); letter-spacing: .2em; }
 .raw { font-size: 15px; color: var(--muted); margin-top: 12px; }
 .status { font-size: 15px; color: var(--muted); margin-top: 2px; min-height: 1.2em; }

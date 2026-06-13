@@ -35,10 +35,21 @@ python -m http.server 8000
 
 Dann im Browser **http://localhost:8000** öffnen.
 
-1. **MIDI-Ausgang** wählen (z. B. „loopMIDI Port"). „Kein MIDI" zeigt nur an.
-2. Optional einen **Audio-Eingang** und den **BPM-Bereich** wählen
-   (Standard 70–140, genau eine Oktave – macht die Tempo-Zuordnung eindeutig).
-3. **Start** drücken und den Mikrofon-Zugriff erlauben.
+1. **„Eingänge laden"** klicken und den Mikrofon-Zugriff erlauben – erst
+   danach zeigt der Browser alle Audio-Eingänge **mit Namen** (siehe Kasten
+   unten). Dann den gewünschten **Audio-Eingang** wählen.
+2. **MIDI-Ausgang**: die Liste öffnen (fragt den MIDI-Zugriff an) und einen
+   Port wählen, z. B. „loopMIDI Port". „Kein MIDI" zeigt nur an.
+3. Optional den **BPM-Bereich** anpassen (Standard 70–140, genau eine
+   Oktave – macht die Tempo-Zuordnung eindeutig).
+4. **Start** drücken.
+
+> **Warum erst „Eingänge laden"?** Aus Datenschutzgründen gibt der Browser
+> die vollständige, benannte Eingangsliste erst nach erteilter
+> Mikrofon-Freigabe heraus; vorher erscheint nur ein anonymer
+> „Standard-Eingang". Berechtigungen werden bewusst erst bei Bedarf
+> angefragt (Mikrofon beim Laden der Eingänge, MIDI beim Öffnen der
+> MIDI-Liste), nicht schon beim Seitenaufruf.
 
 Die große Zahl zeigt das erkannte Tempo; die MIDI-Clock startet automatisch
 mit der ersten stabilen Schätzung (MIDI `start`) und hält bei Stille an
@@ -62,9 +73,18 @@ für den Live-Betrieb sollte der Tab aber sichtbar bleiben.
 
 ## Grenzen gegenüber den Python-Versionen
 
+- **Kürzere Geräteliste als die Python-Version:** Der Browser zeigt eine
+  *logische* Eingangsliste – einen Eintrag pro echtem Gerät. Die Python-App
+  (PortAudio) listet dasselbe Interface mehrfach, einmal pro Host-API
+  (MME, DirectSound, WASAPI, WDM-KS) und Abtastrate; das macht der Browser
+  bewusst nicht. Namen erscheinen zudem erst nach der Mikrofon-Freigabe
+  („Eingänge laden").
 - **Kein Mithören der Wiedergabe** (Spotify o. ä.): Browser dürfen die
-  Ausgabe anderer Apps nicht systemweit mitschneiden. Quelle ist immer
-  Mikrofon oder ein Audio-Interface (Class-Compliant, ohne Treiber).
+  Ausgabe anderer Apps nicht systemweit mitschneiden, und die
+  WASAPI-„Loopback"-Einträge der Windows-Version gibt es im Browser nicht.
+  Quelle ist immer Mikrofon oder ein Audio-Interface (Class-Compliant,
+  ohne Treiber). Ein in Windows aktiviertes „Stereomix" erscheint allerdings
+  als normaler Eingang und lässt sich wählen.
 - **Vereinfachte Analyse:** Statt der HPSS-Trennung dient eine
   Spektralfluss-Onset-Hüllkurve als Grundlage der Autokorrelation. Für
   rhythmisches Material ist das robust; bei sehr flächigem/perkussionsarmem

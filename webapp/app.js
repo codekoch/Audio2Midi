@@ -25,11 +25,14 @@ let levelEma = 0;              // geglaetteter Pegel (RMS)
 let haveEstimate = false;
 let running = false;
 let analyzeTimer = null;
+let inputsUnlocked = false;    // volle, benannte Geraeteliste verfuegbar?
+let unlocking = false;
 
 // --- DOM -------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const elMidi   = $('midiOut');
 const elInput  = $('audioIn');
+const elLoad   = $('loadInputs');
 const elMin    = $('minBpm');
 const elMax    = $('maxBpm');
 const elStart  = $('startBtn');
@@ -43,7 +46,14 @@ const elHint   = $('hint');
 // ---------------------------------------------------------------------------
 // Web MIDI
 // ---------------------------------------------------------------------------
+let midiRequested = false;     // MIDI-Zugriff schon angefragt?
+
+// MIDI-Zugriff erst bei Bedarf anfragen (in-Kontext-Berechtigung), nicht
+// schon beim Laden -- so erscheint der Prompt erst, wenn der Nutzer die
+// MIDI-Liste oeffnet.
 async function initMidi() {
+  if (midiRequested) return;
+  midiRequested = true;
   if (!navigator.requestMIDIAccess) {
     setHint('Web MIDI wird von diesem Browser nicht unterstuetzt. '
           + 'Empfohlen: Chrome, Edge oder Opera.', true);
@@ -52,6 +62,7 @@ async function initMidi() {
   try {
     midiAccess = await navigator.requestMIDIAccess({ sysex: false });
   } catch (e) {
+    midiRequested = false;     // bei Ablehnung erneut versuchbar
     setHint('MIDI-Zugriff verweigert: ' + e.message, true);
     return;
   }
@@ -89,12 +100,40 @@ async function refreshAudioInputs() {
   elInput.add(new Option('Standard-Eingang', ''));
   let i = 1;
   for (const d of devices) {
-    if (d.kind === 'audioinput') {
-      const label = d.label || ('Eingang ' + i++);
+    if (d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default') {
+      // Namen erscheinen erst nach erteilter Mikrofon-Freigabe; davor liefert
+      // der Browser nur einen anonymen Platzhalter.
+      const label = d.label || ('Eingang ' + (i++) + ' (Name nach Freigabe)');
       elInput.add(new Option(label, d.deviceId));
     }
   }
   elInput.value = [...elInput.options].some(o => o.value === prev) ? prev : '';
+}
+
+// Mikrofon einmalig freigeben, damit der Browser die VOLLE, benannte
+// Eingangsliste herausgibt (vorher zeigt er aus Datenschutzgruenden nur
+// einen Platzhalter). Die temporaere Aufnahme wird sofort wieder gestoppt.
+async function unlockInputs() {
+  if (inputsUnlocked || unlocking) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+  unlocking = true;
+  elLoad.disabled = true;
+  setHint('Eingaenge werden geladen … bitte den Mikrofon-Zugriff erlauben.');
+  let tmp = null;
+  try {
+    tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    inputsUnlocked = true;
+    await refreshAudioInputs();
+    elLoad.textContent = 'Aktualisieren';
+    setHint('Eingaenge geladen. Gewuenschten Eingang waehlen und Start druecken.');
+  } catch (e) {
+    setHint('Mikrofon-Zugriff abgelehnt — ohne Freigabe zeigt der Browser nur '
+          + 'den Standard-Eingang. (' + e.message + ')', true);
+  } finally {
+    if (tmp) tmp.getTracks().forEach(t => t.stop());
+    unlocking = false;
+    if (!running) elLoad.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +163,7 @@ async function start() {
   }
 
   // Geraetenamen sind erst nach erteilter Berechtigung sichtbar.
+  inputsUnlocked = true;
   refreshAudioInputs();
 
   audioCtx = new AudioContext();
@@ -168,7 +208,7 @@ function stop() {
   elStart.textContent = 'Start';
   elStart.classList.remove('stop');
   setControlsDisabled(false);
-  elBpm.textContent = '—';
+  setBpmText('—');
   elRaw.textContent = 'roh: —';
   setStatus('bereit');
   updateLevel(-60);
@@ -223,13 +263,13 @@ function render() {
     updateLevel(db);
     if (db < SILENCE_DB) {
       setStatus('KEIN SIGNAL');
-      elBpm.textContent = '—';
+      setBpmText('—');
     } else if (!haveEstimate) {
       setStatus('analysiere …');
-      elBpm.textContent = '—';
+      setBpmText('—');
     } else {
       setStatus('laeuft');
-      elBpm.textContent = String(Math.round(median(estimates)));
+      setBpmText(String(Math.round(median(estimates))));
     }
     elRaw.textContent = 'roh: ' + (lastRaw ? lastRaw.toFixed(1) : '—');
   }
@@ -253,6 +293,11 @@ function clampBpm(v, fallback) {
 
 function setStatus(txt) { elStatus.textContent = txt; }
 
+function setBpmText(txt) {
+  elBpm.textContent = txt;
+  elBpm.classList.toggle('idle', txt === '—');   // Platzhalter gedimmt
+}
+
 function setHint(txt, isError) {
   elHint.textContent = txt;
   elHint.classList.toggle('error', !!isError);
@@ -267,6 +312,7 @@ function updateLevel(db) {
 
 function setControlsDisabled(on) {
   elInput.disabled = on;
+  elLoad.disabled = on;
   elMin.disabled = on;
   elMax.disabled = on;
   // MIDI-Ausgang darf auch im Lauf umgestellt werden.
@@ -277,15 +323,23 @@ function setControlsDisabled(on) {
 // ---------------------------------------------------------------------------
 elStart.addEventListener('click', () => running ? stop() : start());
 elMidi.addEventListener('change', applyMidiOutput);
+elLoad.addEventListener('click', () => { inputsUnlocked = false; unlockInputs(); });
+// Beim ersten Antippen der Liste die Freigabe gleich mit anbieten.
+elInput.addEventListener('focus', () => { if (!inputsUnlocked) unlockInputs(); });
+// MIDI-Liste beim ersten Oeffnen befuellen (fordert dann den MIDI-Zugriff an).
+elMidi.addEventListener('focus', initMidi);
 
 window.addEventListener('DOMContentLoaded', () => {
   if (!window.isSecureContext) {
     setHint('Diese Seite muss ueber http://localhost oder HTTPS laufen -- '
           + 'sonst sind Mikrofon und MIDI gesperrt. Siehe README.', true);
   }
-  initMidi();
+  elMidi.add(new Option('Kein MIDI (Liste öffnen zum Verbinden)', ''));
   refreshAudioInputs();
+  setBpmText('—');
   setStatus('bereit');
   updateLevel(-60);
+  setHint('„Eingänge laden“ klicken, um alle Audio-Eingänge mit Namen zu sehen. '
+        + 'MIDI-Liste öffnen, um den MIDI-Ausgang zu wählen.');
   requestAnimationFrame(render);
 });

@@ -15,7 +15,13 @@
   <section class="controls">
     <div class="field">
       <label for="audioIn">Audio-Eingang</label>
-      <select id="audioIn"></select>
+      <div class="row">
+        <select id="audioIn"></select>
+        <button id="loadInputs" class="ghost"
+                title="Mikrofon freigeben, damit alle Eingaenge mit Namen erscheinen">
+          Eingänge laden
+        </button>
+      </div>
     </div>
     <div class="field">
       <label for="midiOut">MIDI-Ausgang</label>
