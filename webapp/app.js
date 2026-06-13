@@ -27,6 +27,8 @@ let running = false;
 let analyzeTimer = null;
 let inputsUnlocked = false;    // volle, benannte Geraeteliste verfuegbar?
 let unlocking = false;
+let grantedDeviceId = '';      // zuletzt tatsaechlich freigegebenes Geraet
+let grantedLabel = '';         //   (aus dem Audio-Track gelesen -- immer gueltig)
 
 // --- DOM -------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
@@ -92,22 +94,51 @@ function applyMidiOutput() {
 // ---------------------------------------------------------------------------
 // Audio-Eingaenge
 // ---------------------------------------------------------------------------
+// Tatsaechlich freigegebenes Geraet aus dem Audio-Track lesen. Das ist
+// zuverlaessiger als enumerateDevices(): manche Browser (z. B. Firefox mit
+// "Dieses Mal erlauben") liefern direkt nach der Freigabe noch leere
+// Geraete-IDs -- die ID/der Name des erhaltenen Tracks stimmen aber immer.
+function captureGranted(stream) {
+  try {
+    const t = stream.getAudioTracks()[0];
+    if (!t) return;
+    const s = t.getSettings ? t.getSettings() : {};
+    if (s.deviceId) grantedDeviceId = s.deviceId;
+    if (t.label) grantedLabel = t.label;
+  } catch (e) { /* ignorieren */ }
+}
+
 async function refreshAudioInputs() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return 0;
   const devices = await navigator.mediaDevices.enumerateDevices();
   const prev = elInput.value;
   elInput.innerHTML = '';
-  elInput.add(new Option('Standard-Eingang', ''));
-  let i = 1;
-  for (const d of devices) {
-    if (d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default') {
-      // Namen erscheinen erst nach erteilter Mikrofon-Freigabe; davor liefert
-      // der Browser nur einen anonymen Platzhalter.
-      const label = d.label || ('Eingang ' + (i++) + ' (Name nach Freigabe)');
-      elInput.add(new Option(label, d.deviceId));
-    }
+  elInput.add(new Option('Standard-Eingang', ''));   // = Browser-Standard
+  const seen = new Set(['']);
+  let count = 0, i = 1;
+
+  // Das gerade freigegebene Geraet auf jeden Fall anbieten (s. captureGranted).
+  if (grantedDeviceId && !seen.has(grantedDeviceId)) {
+    elInput.add(new Option(grantedLabel || 'Freigegebener Eingang', grantedDeviceId));
+    seen.add(grantedDeviceId);
+    count++;
   }
+
+  for (const d of devices) {
+    if (d.kind !== 'audioinput') continue;
+    if (!d.deviceId) continue;                       // ohne ID nicht waehlbar
+    if (d.deviceId === 'communications') continue;   // Windows-Duplikat
+    if (seen.has(d.deviceId)) continue;
+    // Namen erscheinen erst nach erteilter Mikrofon-Freigabe; davor liefert
+    // der Browser nur einen anonymen Platzhalter.
+    const label = d.label || ('Eingang ' + (i++) + ' (Name nach Freigabe)');
+    elInput.add(new Option(label, d.deviceId));
+    seen.add(d.deviceId);
+    count++;
+  }
+
   elInput.value = [...elInput.options].some(o => o.value === prev) ? prev : '';
+  return count;
 }
 
 // Mikrofon einmalig freigeben, damit der Browser die VOLLE, benannte
@@ -122,10 +153,12 @@ async function unlockInputs() {
   let tmp = null;
   try {
     tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    captureGranted(tmp);
     inputsUnlocked = true;
-    await refreshAudioInputs();
+    const n = await refreshAudioInputs();
     elLoad.textContent = 'Aktualisieren';
-    setHint('Eingaenge geladen. Gewuenschten Eingang waehlen und Start druecken.');
+    setHint(n + ' Eingang/Eingaenge geladen. Gewuenschten Eingang waehlen '
+          + 'und Start druecken.');
   } catch (e) {
     setHint('Mikrofon-Zugriff abgelehnt — ohne Freigabe zeigt der Browser nur '
           + 'den Standard-Eingang. (' + e.message + ')', true);
@@ -163,6 +196,7 @@ async function start() {
   }
 
   // Geraetenamen sind erst nach erteilter Berechtigung sichtbar.
+  captureGranted(mediaStream);
   inputsUnlocked = true;
   refreshAudioInputs();
 

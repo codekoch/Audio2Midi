@@ -50,6 +50,13 @@ Dann im Browser **http://localhost:8000** öffnen.
 > „Standard-Eingang". Berechtigungen werden bewusst erst bei Bedarf
 > angefragt (Mikrofon beim Laden der Eingänge, MIDI beim Öffnen der
 > MIDI-Liste), nicht schon beim Seitenaufruf.
+>
+> **Firefox** zeigt die Geräteauswahl in seinem *eigenen* Berechtigungs­dialog
+> und gibt bei „Dieses Mal erlauben" oft nur das gewählte Gerät an die Liste
+> weiter – das gewünschte Mikrofon also direkt im Browser-Dialog auswählen
+> (oder „Beim Besuch dieser Website merken" wählen, dann erscheint die volle
+> Liste). Für die eigentliche MIDI-Ausgabe ohnehin **Chrome/Edge** verwenden;
+> dort funktioniert auch die In-App-Auswahl vollständig.
 
 Die große Zahl zeigt das erkannte Tempo; die MIDI-Clock startet automatisch
 mit der ersten stabilen Schätzung (MIDI `start`) und hält bei Stille an
