@@ -52,6 +52,7 @@ button.ghost {
 }
 button.ghost:hover { background: var(--surface-hi); }
 button.ghost:disabled { opacity: .5; cursor: default; }
+button.ghost.on { border-color: var(--accent); color: var(--accent); }
 select, input[type="number"] {
   background: var(--surface); color: var(--fg); border: 1px solid var(--surface-hi);
   border-radius: 6px; padding: 8px 10px; font-size: 14px;
@@ -74,6 +75,11 @@ main {
   color: var(--accent); font-variant-numeric: tabular-nums;
 }
 .bpm.idle { color: var(--muted); opacity: .5; }
+.keyblock { margin-top: 26px; text-align: center; }
+.key { font-size: clamp(40px, 9vw, 88px); font-weight: 700; line-height: 1; }
+#keyName { color: var(--accent); }
+#keyName.idle { color: var(--muted); opacity: .6; }
+.par { font-size: .42em; font-weight: 600; color: var(--muted); margin-left: .2em; }
 .cap { font-size: 14px; color: var(--muted); letter-spacing: .2em; }
 .raw { font-size: 15px; color: var(--muted); margin-top: 12px; }
 .status { font-size: 15px; color: var(--muted); margin-top: 2px; min-height: 1.2em; }
@@ -115,6 +121,11 @@ main {
         <input type="number" id="maxBpm" value="140" min="30" max="300" step="1">
       </div>
     </div>
+    <div class="field">
+      <label>Tonart</label>
+      <button id="keyToggle" class="ghost"
+              title="Grundtonart (mit Paralleltonart) anzeigen">anzeigen</button>
+    </div>
     <button id="startBtn">Start</button>
   </section>
 
@@ -123,6 +134,10 @@ main {
     <div class="cap">BPM</div>
     <div class="raw" id="raw">roh: —</div>
     <div class="status" id="status">bereit</div>
+    <div class="keyblock" id="keyBlock" style="display:none">
+      <div class="key"><span id="keyName" class="idle">—</span><span class="par" id="keyPar"></span></div>
+      <div class="cap">TONART</div>
+    </div>
     <div class="level">
       <span class="lbl">PEGEL</span>
       <div class="track"><div id="levelBar"></div></div>
@@ -150,6 +165,17 @@ const BPM_MEDIAN_LEN    = 16;
 const SILENCE_DB        = -55.0;
 const DEFAULT_MIN_BPM   = 70;
 const DEFAULT_MAX_BPM   = 140;
+
+// Tonart (Sha'ath-Profile, Konstanten wie im Python-Kern)
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const KS_MAJOR = [6.6,2.0,3.5,2.3,4.6,4.0,2.5,5.2,2.4,3.7,2.3,3.4];
+const KS_MINOR = [6.5,2.7,3.5,5.4,2.6,3.5,2.5,5.2,4.0,2.7,4.3,3.2];
+const BASS_TONIC_WEIGHT    = 0.30;
+const CHROMA_LOG_COMP      = 10.0;
+const KEY_EMA_SEC          = 15.0;
+const KEY_SWITCH_CONFIRM   = 2;
+const KEY_CONFIDENT_MARGIN = 0.12;
+const KEY_CONFIDENT_MIN_N  = 16;
 
 const PPQN          = 24;
 const LOOKAHEAD_MS  = 120;
@@ -221,8 +247,39 @@ class TempoAnalyzer {
     this.prevMag = new Float32Array(FFT_SIZE / 2);
     this.onset = [];
     this._havePrev = false;
+    // --- Tonart-Chroma ueber eine SEPARATE, groessere FFT ---
+    // Bei FFT_SIZE 2048 sind die Bins (~23 Hz) im Bass/Mittenbereich groeber
+    // als ein Halbton -> einzelne Tonklassen blieben leer ("Loecher"). Eine
+    // groessere FFT (16384 ~ 0,34 s -> ~3-Hz-Bins) gibt eine saubere Ton-
+    // klassen-Zuordnung. Wird nur ~1x/s ausgewertet (computeChroma).
+    this.NC = 16384;
+    this.fftC = new FFT(this.NC);
+    this.winC = new Float32Array(this.NC);
+    for (let i = 0; i < this.NC; i++) {
+      this.winC[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (this.NC - 1));
+    }
+    this.cbuf = new Float32Array(this.NC);   // rollender Sample-Puffer
+    this.cbufFilled = 0;
+    this.reC = new Float32Array(this.NC);
+    this.imC = new Float32Array(this.NC);
+    const halfC = this.NC / 2;
+    this.binPc = new Int8Array(halfC);       // Bin -> Tonklasse (0=C), -1=ignorieren
+    this.binBass = new Uint8Array(halfC);    // Bin im Bassbereich? (Grundton-Evidenz)
+    for (let k = 1; k < halfC; k++) {
+      const f = k * sampleRate / this.NC;
+      if (f < 55 || f > 5000) { this.binPc[k] = -1; continue; }
+      const midi = Math.round(69 + 12 * Math.log2(f / 440));
+      this.binPc[k] = ((midi % 12) + 12) % 12;
+      this.binBass[k] = (f >= 55 && f <= 260) ? 1 : 0;   // ~A1..C4
+    }
+    this.binPc[0] = -1;
   }
   pushChunk(chunk) {
+    // Samples zusaetzlich in den groesseren Chroma-Puffer schieben.
+    this.cbuf.copyWithin(0, HOP_SIZE);
+    this.cbuf.set(chunk, this.NC - HOP_SIZE);
+    if (this.cbufFilled < this.NC) this.cbufFilled += HOP_SIZE;
+
     this.frame.copyWithin(0, HOP_SIZE);
     this.frame.set(chunk, FFT_SIZE - HOP_SIZE);
     const re = this.re, im = this.im, win = this.win;
@@ -244,6 +301,28 @@ class TempoAnalyzer {
       }
     }
     this._havePrev = true;
+  }
+  // Chroma (pcp + bass, je auf Summe 1, log-komprimiert) aus dem aktuellen
+  // Sample-Puffer ueber die grosse FFT berechnen. null, solange der Puffer
+  // noch nicht voll ist (~0,34 s nach Start).
+  computeChroma() {
+    if (this.cbufFilled < this.NC) return null;
+    const re = this.reC, im = this.imC, win = this.winC;
+    for (let i = 0; i < this.NC; i++) { re[i] = this.cbuf[i] * win[i]; im[i] = 0; }
+    this.fftC.transform(re, im);
+    const halfC = this.NC / 2;
+    const c = new Float32Array(12), bas = new Float32Array(12);
+    const bpc = this.binPc, bbs = this.binBass;
+    for (let k = 1; k < halfC; k++) {
+      const pc = bpc[k];
+      if (pc < 0) continue;
+      const mag = Math.hypot(re[k], im[k]);
+      c[pc] += mag;
+      if (bbs[k]) bas[pc] += mag;
+    }
+    const pcp = chromaNorm(c);
+    const bass = chromaNorm(bas);
+    return pcp ? { pcp, bass: bass || new Float32Array(12) } : null;
   }
   estimate() {
     const e = this.onset, L = e.length;
@@ -289,6 +368,57 @@ class TempoAnalyzer {
     if (denom !== 0) { const delta = 0.5 * (y0 - y2) / denom; if (delta > -1 && delta < 1) lag = bestLag + delta; }
     return { bpm: 60 * this.envRate / lag, conf: ratio };
   }
+}
+
+// ===========================================================================
+// Tonart-Bestimmung (Sha'ath-Profile, Bass-Evidenz) -- portiert aus
+// classify_key() im Python-Kern.
+// ===========================================================================
+function chromaNorm(v) {
+  let s = 0; for (let i = 0; i < 12; i++) s += v[i];
+  if (s <= 0) return null;
+  const out = new Float32Array(12);
+  let s2 = 0;
+  for (let i = 0; i < 12; i++) { out[i] = Math.log1p(CHROMA_LOG_COMP * (v[i] / s)); s2 += out[i]; }
+  if (s2 > 0) for (let i = 0; i < 12; i++) out[i] /= s2;
+  return out;
+}
+// Pearson-Korrelation von pcp mit dem um i rotierten Profil (Grundton -> i):
+// rotiertes Profil r[j] = prof[(j - i) mod 12].
+function profCorr(pcp, prof, i) {
+  let ma = 0, mb = 0;
+  for (let j = 0; j < 12; j++) { ma += pcp[j]; mb += prof[j]; }
+  ma /= 12; mb /= 12;
+  let num = 0, da = 0, db = 0;
+  for (let j = 0; j < 12; j++) {
+    const pj = prof[((j - i) % 12 + 12) % 12];
+    const xa = pcp[j] - ma, xb = pj - mb;
+    num += xa * xb; da += xa * xa; db += xb * xb;
+  }
+  const den = Math.sqrt(da * db);
+  return den > 0 ? num / den : 0;
+}
+function classifyKey(pcp, bass) {
+  const useBass = bass && bass.some(v => v > 0);
+  const scores = [];
+  for (let i = 0; i < 12; i++) {
+    let bonus = 0;
+    if (useBass) bonus = BASS_TONIC_WEIGHT * (bass[i] + 0.5 * bass[(i + 7) % 12]);
+    scores.push([profCorr(pcp, KS_MAJOR, i) + bonus, NOTE_NAMES[i] + ' Dur']);
+    scores.push([profCorr(pcp, KS_MINOR, i) + bonus, NOTE_NAMES[i] + ' Moll']);
+  }
+  scores.sort((a, b) => b[0] - a[0]);
+  return { name: scores[0][1], margin: scores[0][0] - scores[1][0], second: scores[1][1] };
+}
+// Paralleltonart (relative Tonart): C-Dur <-> a-Moll usw.
+function parallelKey(key) {
+  const p = key.split(' ');
+  if (p.length !== 2) return '';
+  const i = NOTE_NAMES.indexOf(p[0]);
+  if (i < 0) return '';
+  if (p[1] === 'Dur')  return NOTE_NAMES[(i + 9) % 12] + ' Moll';
+  if (p[1] === 'Moll') return NOTE_NAMES[(i + 3) % 12] + ' Dur';
+  return '';
 }
 
 // ===========================================================================
@@ -384,11 +514,19 @@ let grantedDeviceId = '';
 let grantedLabel = '';
 let midiRequested = false;
 
+// Tonart-Zustand (zweistufige Mittelung + Hysterese wie im Python-Kern)
+let keyEnabled = false;
+let keyDisp = '—', keyPend = null, keyPendN = 0, keyConfident = false;
+let emaPcp = null, emaBass = null, cumPcp = null, cumBass = null, cumN = 0;
+const KEY_EMA_A = ANALYSIS_INTERVAL / KEY_EMA_SEC;
+
 const $ = (id) => document.getElementById(id);
 const elMidi = $('midiOut'), elInput = $('audioIn'), elLoad = $('loadInputs');
 const elMin = $('minBpm'), elMax = $('maxBpm'), elStart = $('startBtn');
 const elBpm = $('bpm'), elRaw = $('raw'), elStatus = $('status');
 const elBar = $('levelBar'), elDb = $('db'), elHint = $('hint');
+const elKeyToggle = $('keyToggle'), elKeyBlock = $('keyBlock');
+const elKeyName = $('keyName'), elKeyPar = $('keyPar');
 
 // --- Web MIDI (erst bei Bedarf anfragen) ---
 async function initMidi() {
@@ -537,6 +675,7 @@ async function start() {
   }
 
   estimates = []; lastRaw = 0; levelEma = 0; haveEstimate = false;
+  resetKey();
   clock.enable();
   analyzeTimer = setInterval(analyze, ANALYSIS_INTERVAL * 1000);
   lastChunkTime = performance.now();
@@ -556,6 +695,8 @@ function stop() {
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
   analyzer = null; haveEstimate = false; estimates = [];
+  resetKey();
+  if (keyEnabled) updateKeyDisplay();
   elStart.textContent = 'Start';
   elStart.classList.remove('stop');
   setControlsDisabled(false);
@@ -580,6 +721,7 @@ function analyze() {
   const db = levelEma > 0 ? 20 * Math.log10(levelEma) : -120;
   if (db < SILENCE_DB) {
     estimates = []; haveEstimate = false; clock.setTargetBpm(null);
+    resetKey();
     return;
   }
   const est = analyzer.estimate();
@@ -590,6 +732,57 @@ function analyze() {
     haveEstimate = true;
     clock.setTargetBpm(median(estimates));
   }
+  updateKey();
+}
+
+// --- Tonart: Chroma -> 50% schnelle EMA + 50% Gesamtmittel -> Klassifikation
+//     mit Hysterese (wie im Python-Kern). Laeuft immer mit (guenstig); die
+//     Anzeige erscheint nur, wenn der Tonart-Button aktiv ist.
+function resetKey() {
+  keyDisp = '—'; keyPend = null; keyPendN = 0; keyConfident = false;
+  emaPcp = emaBass = cumPcp = cumBass = null; cumN = 0;
+  if (analyzer) { analyzer.cbuf.fill(0); analyzer.cbufFilled = 0; }
+}
+function updateKey() {
+  const ch = analyzer.computeChroma();
+  if (!ch) return;
+  const p = ch.pcp, b = ch.bass;
+  if (emaPcp === null) {
+    emaPcp = p.slice(); emaBass = b.slice();
+    cumPcp = p.slice(); cumBass = b.slice(); cumN = 1;
+  } else {
+    for (let i = 0; i < 12; i++) {
+      emaPcp[i]  = (1 - KEY_EMA_A) * emaPcp[i]  + KEY_EMA_A * p[i];
+      emaBass[i] = (1 - KEY_EMA_A) * emaBass[i] + KEY_EMA_A * b[i];
+      cumPcp[i] += p[i]; cumBass[i] += b[i];
+    }
+    cumN++;
+  }
+  const prof = new Float32Array(12), bprof = new Float32Array(12);
+  for (let i = 0; i < 12; i++) {
+    prof[i]  = 0.5 * emaPcp[i]  + 0.5 * (cumPcp[i]  / cumN);
+    bprof[i] = 0.5 * emaBass[i] + 0.5 * (cumBass[i] / cumN);
+  }
+  const r = classifyKey(prof, bprof);
+  const cand = r.name;
+  // Hysterese: Wechsel erst nach KEY_SWITCH_CONFIRM gleichen Folgeschaetzungen.
+  if (cand !== keyDisp) {
+    if (keyDisp === '—' || cand === '—') { keyDisp = cand; keyPend = null; keyPendN = 0; }
+    else if (cand === keyPend) {
+      keyPendN++;
+      if (keyPendN >= KEY_SWITCH_CONFIRM) { keyDisp = cand; keyPend = null; keyPendN = 0; }
+    } else { keyPend = cand; keyPendN = 1; }
+  } else { keyPend = null; keyPendN = 0; }
+  keyConfident = (cand === keyDisp && cand !== '—'
+                  && r.margin >= KEY_CONFIDENT_MARGIN && cumN >= KEY_CONFIDENT_MIN_N);
+}
+function updateKeyDisplay() {
+  const show = running && keyDisp !== '—';
+  elKeyName.textContent = show ? keyDisp : '—';
+  const par = show ? parallelKey(keyDisp) : '';
+  elKeyPar.textContent = par ? '(' + par + ')' : '';
+  // Gedimmt, solange die Erkennung noch unsicher ist (wie im Python-Kern).
+  elKeyName.classList.toggle('idle', !(show && keyConfident));
 }
 
 // --- Anzeige ---
@@ -608,6 +801,7 @@ function render() {
     }
     elRaw.textContent = 'roh: ' + (lastRaw ? lastRaw.toFixed(1) : '—');
   }
+  if (keyEnabled) updateKeyDisplay();
   requestAnimationFrame(render);
 }
 
@@ -635,6 +829,13 @@ elMidi.addEventListener('change', applyMidiOutput);
 elLoad.addEventListener('click', () => { inputsUnlocked = false; unlockInputs(); });
 elInput.addEventListener('focus', () => { if (!inputsUnlocked) unlockInputs(); });
 elMidi.addEventListener('focus', initMidi);
+elKeyToggle.addEventListener('click', () => {
+  keyEnabled = !keyEnabled;
+  elKeyBlock.style.display = keyEnabled ? '' : 'none';
+  elKeyToggle.textContent = keyEnabled ? 'ausblenden' : 'anzeigen';
+  elKeyToggle.classList.toggle('on', keyEnabled);
+  if (keyEnabled) updateKeyDisplay();
+});
 
 window.addEventListener('DOMContentLoaded', () => {
   elMidi.add(new Option('Kein MIDI (Liste öffnen zum Verbinden)', ''));

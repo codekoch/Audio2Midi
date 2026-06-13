@@ -1,9 +1,9 @@
 # Audio2Midi -- WebApp (BPM + MIDI-Clock)
 
-Eine schlanke Browser-Variante des Projekts: **nur** Tempo-Erkennung (BPM)
-mit **stabiler MIDI-Clock-Ausgabe** (24 PPQN). Keine Installation, kein
-Python -- läuft direkt im Browser über die **Web Audio API** (Eingang) und
-die **Web MIDI API** (Clock-Ausgabe).
+Eine schlanke Browser-Variante des Projekts: Tempo-Erkennung (BPM) mit
+**stabiler MIDI-Clock-Ausgabe** (24 PPQN), optional auch die Grundtonart.
+Keine Installation, kein Python -- läuft direkt im Browser über die
+**Web Audio API** (Eingang) und die **Web MIDI API** (Clock-Ausgabe).
 
 Tonart, Akkorde, Loopback und die Kiosk-Oberfläche bleiben den
 Python-Versionen vorbehalten; diese WebApp ist bewusst auf den Kern
@@ -40,6 +40,15 @@ völlig ausreichend; die MIDI-Clock ist davon ohnehin unabhängig.
 
 Beim Start fragt der Browser nach Mikrofon-Zugriff. Bedienung wie unten
 („Eingänge laden" → Eingang wählen, MIDI-Liste öffnen → Port wählen, Start).
+
+**Zusätzlich: Tonart-Anzeige.** Über den Button **„Tonart"** lässt sich
+optional die erkannte Grundtonart mit Paralleltonart einblenden (z. B.
+„C Dur (A Moll)"). Die Erkennung ist aus dem Python-Kern portiert
+(Sha'ath-Profile, Bass-Evidenz zur Unterscheidung von Dur und Mollparallele,
+zweistufige Mittelung mit Hysterese; unsichere Erkennung wird gedimmt). Das
+Chroma stammt hier aus einer STFT (statt der CQT des Python-Projekts), ist
+also etwas einfacher – für die Grundtonart aber gut brauchbar. Nur in der
+Einzeldatei-Variante vorhanden.
 
 ## Variante 2: Server (AudioWorklet)
 
@@ -125,7 +134,9 @@ für den Live-Betrieb sollte der Tab aber sichtbar bleiben.
   Spektralfluss-Onset-Hüllkurve als Grundlage der Autokorrelation. Für
   rhythmisches Material ist das robust; bei sehr flächigem/perkussionsarmem
   Material ist die Python-Version etwas treffsicherer.
-- **Nur BPM**, keine Tonart/Akkorde, kein Beat-Sync.
+- **Tonart** (optional, nur Einzeldatei): Grundtonart + Paralleltonart aus
+  STFT-Chroma statt CQT – etwas weniger treffsicher als die Python-Version,
+  vor allem bei der Dur/Moll-Unterscheidung. Keine Akkorde, kein Beat-Sync.
 
 ## Dateien
 
