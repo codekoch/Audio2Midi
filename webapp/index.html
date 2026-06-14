@@ -83,6 +83,7 @@ main {
   color: var(--accent); font-variant-numeric: tabular-nums;
 }
 .bpm.idle { color: var(--muted); opacity: .5; }
+.bpm.notes { font-size: clamp(36px, 9vw, 100px); }   /* Noten-Modus: mehrere Namen */
 .keyblock { margin-top: 26px; text-align: center; }
 .key { font-size: clamp(40px, 9vw, 88px); font-weight: 700; line-height: 1; }
 #keyName { color: var(--accent); }
@@ -108,6 +109,14 @@ main {
   </header>
 
   <section class="controls">
+    <div class="field">
+      <label for="opMode">Modus</label>
+      <select id="opMode">
+        <option value="clock">Tempo &amp; MIDI-Clock</option>
+        <option value="mono">Noten → MIDI (monophon)</option>
+        <option value="poly">Noten → MIDI (polyphon)</option>
+      </select>
+    </div>
     <div class="field">
       <label for="srcMode">Quelle</label>
       <select id="srcMode">
@@ -147,7 +156,7 @@ main {
 
   <main>
     <div class="bpm idle" id="bpm">—</div>
-    <div class="cap">BPM</div>
+    <div class="cap" id="bpmCap">BPM</div>
     <div class="raw" id="raw">roh: —</div>
     <div class="status" id="status">bereit</div>
     <div class="keyblock" id="keyBlock" style="display:none">
@@ -200,6 +209,13 @@ const TICK_MS       = 25;
 const SLEW_BPM_PER_S = 8.0;
 const DEADBAND_BPM  = 0.15;
 const MSG_CLOCK = 0xF8, MSG_START = 0xFA, MSG_STOP = 0xFC;
+
+// Noten-Modus (Pitch -> MIDI)
+const NOTE_CH          = 0;       // MIDI-Kanal 1
+const NOTE_MIN_MIDI    = 36;      // C2
+const NOTE_MAX_MIDI    = 96;      // C7
+const NOTE_SILENCE_RMS = 0.004;   // ~ -48 dBFS: darunter keine Note
+const YIN_THRESHOLD    = 0.15;    // YIN-Schwelle (kleiner = strenger)
 
 // ===========================================================================
 // Radix-2-FFT (in-place)
@@ -508,6 +524,154 @@ class MidiClock {
 }
 
 // ===========================================================================
+// Noten-Modus: Pitch -> MIDI (monophon: YIN, polyphon: FFT-Peaks)
+// ===========================================================================
+function midiName(m) {
+  return NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+}
+function velFromLevel(level) {
+  const db = level > 0 ? 20 * Math.log10(level) : -90;
+  return Math.max(1, Math.min(127, Math.round((db + 54) / 48 * 127)));
+}
+// YIN-Tonhoehe (monophon): kumulative mittlere Differenz + Schwelle +
+// Parabel-Interpolation. Rueckgabe Frequenz in Hz oder 0 (kein Ton).
+function yinPitch(buf, sr, threshold) {
+  const n = buf.length, maxTau = n >> 1;
+  const cmnd = new Float32Array(maxTau);
+  cmnd[0] = 1;
+  let runningSum = 0, tauEst = -1;
+  for (let tau = 1; tau < maxTau; tau++) {
+    let sum = 0;
+    for (let i = 0; i < maxTau; i++) { const d = buf[i] - buf[i + tau]; sum += d * d; }
+    runningSum += sum;
+    cmnd[tau] = runningSum > 0 ? sum * tau / runningSum : 1;
+  }
+  for (let tau = 2; tau < maxTau; tau++) {
+    if (cmnd[tau] < threshold) {
+      while (tau + 1 < maxTau && cmnd[tau + 1] < cmnd[tau]) tau++;
+      tauEst = tau; break;
+    }
+  }
+  if (tauEst === -1) return 0;
+  let bt = tauEst;
+  if (tauEst > 1 && tauEst + 1 < maxTau) {
+    const s0 = cmnd[tauEst - 1], s1 = cmnd[tauEst], s2 = cmnd[tauEst + 1];
+    const denom = 2 * (2 * s1 - s2 - s0);
+    if (denom !== 0) bt = tauEst + (s2 - s0) / denom;
+  }
+  return bt > 0 ? sr / bt : 0;
+}
+
+class NoteEngine {
+  constructor(sampleRate, poly, send) {
+    this.sr = sampleRate;
+    this.poly = poly;
+    this.send = send;                 // (bytes[]) => void
+    this.win = poly ? 4096 : 2048;    // Analysefenster (poly braucht mehr Aufloesung)
+    this.buf = new Float32Array(this.win);
+    this.filled = 0;
+    this.display = '—';
+    this.curNote = -1; this.candNote = -1; this.candN = 0;   // mono
+    this.active = new Map();          // poly: midi -> Anzahl Frames ohne Beleg
+    if (poly) {
+      this.fft = new FFT(this.win);
+      this.re = new Float32Array(this.win);
+      this.im = new Float32Array(this.win);
+      this.han = new Float32Array(this.win);
+      for (let i = 0; i < this.win; i++) this.han[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (this.win - 1));
+    }
+  }
+  push(chunk) {
+    const h = chunk.length;
+    this.buf.copyWithin(0, h);
+    this.buf.set(chunk, this.win - h);
+    if (this.filled < this.win) this.filled += h;
+  }
+  process(level) {
+    if (this.filled < this.win) return;
+    if (this.poly) this._poly(level); else this._mono(level);
+  }
+  _mono(level) {
+    let note = -1;
+    if (level > NOTE_SILENCE_RMS) {
+      const f = yinPitch(this.buf, this.sr, YIN_THRESHOLD);
+      if (f > 0) {
+        const m = Math.round(69 + 12 * Math.log2(f / 440));
+        if (m >= NOTE_MIN_MIDI && m <= NOTE_MAX_MIDI) note = m;
+      }
+    }
+    if (note === -1) {                                  // Stille / kein Ton
+      if (this.curNote !== -1) { this.send([0x80 | NOTE_CH, this.curNote, 0]); this.curNote = -1; }
+      this.candNote = -1; this.candN = 0; this.display = '—';
+      return;
+    }
+    if (note === this.curNote) { this.candNote = -1; this.candN = 0; return; }   // gehalten
+    if (note === this.candNote) this.candN++; else { this.candNote = note; this.candN = 1; }
+    const need = (this.curNote === -1) ? 1 : 2;         // aus Stille sofort, Wechsel kurz entprellen
+    if (this.candN >= need) {
+      if (this.curNote !== -1) this.send([0x80 | NOTE_CH, this.curNote, 0]);
+      this.send([0x90 | NOTE_CH, note, velFromLevel(level)]);
+      this.curNote = note; this.candNote = -1; this.candN = 0;
+      this.display = midiName(note);
+    }
+  }
+  _poly(level) {
+    const detected = new Set();
+    if (level > NOTE_SILENCE_RMS) {
+      const N = this.win, re = this.re, im = this.im, han = this.han;
+      for (let i = 0; i < N; i++) { re[i] = this.buf[i] * han[i]; im[i] = 0; }
+      this.fft.transform(re, im);
+      const half = N >> 1, mag = new Float32Array(half);
+      let maxMag = 0;
+      for (let k = 1; k < half; k++) { const m = Math.hypot(re[k], im[k]); mag[k] = m; if (m > maxMag) maxMag = m; }
+      if (maxMag > 0) {
+        const thr = maxMag * 0.12, cands = [];
+        for (let k = 2; k < half - 1; k++) {
+          if (mag[k] > thr && mag[k] > mag[k - 1] && mag[k] >= mag[k + 1]) {
+            const a = mag[k - 1], b = mag[k], c = mag[k + 1], denom = a - 2 * b + c;
+            const delta = denom !== 0 ? 0.5 * (a - c) / denom : 0;
+            cands.push({ freq: (k + delta) * this.sr / N, mag: b });
+          }
+        }
+        cands.sort((x, y) => y.mag - x.mag);
+        const accepted = [];
+        for (const cand of cands) {
+          if (accepted.length >= 6) break;
+          const m = Math.round(69 + 12 * Math.log2(cand.freq / 440));
+          if (m < NOTE_MIN_MIDI || m > NOTE_MAX_MIDI || detected.has(m)) continue;
+          let harmonic = false;                         // Oberton eines staerkeren Grundtons?
+          for (const acc of accepted) {
+            const r = cand.freq / acc.freq;
+            if (r > 1.5 && Math.abs(r - Math.round(r)) < 0.04) { harmonic = true; break; }
+          }
+          if (harmonic) continue;
+          accepted.push({ freq: cand.freq, midi: m });
+          detected.add(m);
+        }
+      }
+    }
+    const vel = velFromLevel(level);
+    for (const m of detected) {
+      if (!this.active.has(m)) this.send([0x90 | NOTE_CH, m, vel]);
+      this.active.set(m, 0);
+    }
+    for (const [m, miss] of [...this.active]) {          // Note-Off mit 1 Frame Nachsicht
+      if (detected.has(m)) continue;
+      if (miss >= 1) { this.send([0x80 | NOTE_CH, m, 0]); this.active.delete(m); }
+      else this.active.set(m, miss + 1);
+    }
+    const on = [...this.active.keys()].filter(m => this.active.get(m) === 0).sort((a, b) => a - b);
+    this.display = on.length ? on.map(midiName).join(' ') : '—';
+  }
+  allOff() {
+    if (this.curNote !== -1) { this.send([0x80 | NOTE_CH, this.curNote, 0]); this.curNote = -1; }
+    for (const m of this.active.keys()) this.send([0x80 | NOTE_CH, m, 0]);
+    this.active.clear();
+    this.display = '—';
+  }
+}
+
+// ===========================================================================
 // App-Glue
 // ===========================================================================
 const clock = new MidiClock();
@@ -531,6 +695,11 @@ let grantedDeviceId = '';
 let grantedLabel = '';
 let midiRequested = false;
 
+// Betriebsart + Noten-Modus
+let opMode = 'clock';          // 'clock' | 'mono' | 'poly'
+let noteEngine = null;
+let midiOut = null;            // aktiver MIDI-Ausgang (auch fuer Noten-Modus)
+
 // Tonart-Zustand (zweistufige Mittelung + Hysterese wie im Python-Kern)
 let keyEnabled = false;
 let keyDisp = '—', keyPend = null, keyPendN = 0, keyConfident = false;
@@ -538,6 +707,7 @@ let emaPcp = null, emaBass = null, cumPcp = null, cumBass = null, cumN = 0;
 const KEY_EMA_A = ANALYSIS_INTERVAL / KEY_EMA_SEC;
 
 const $ = (id) => document.getElementById(id);
+const elMode = $('opMode'), elBpmCap = $('bpmCap');
 const elSource = $('srcMode');
 const elMidi = $('midiOut'), elInput = $('audioIn'), elLoad = $('loadInputs');
 const elMin = $('minBpm'), elMax = $('maxBpm'), elStart = $('startBtn');
@@ -574,7 +744,8 @@ function refreshMidiOutputs() {
 }
 function applyMidiOutput() {
   const id = elMidi.value;
-  clock.setOutput(id ? midiAccess.outputs.get(id) : null);
+  midiOut = id ? midiAccess.outputs.get(id) : null;
+  clock.setOutput(midiOut);            // Clock und Noten-Modus nutzen denselben Port
 }
 
 // --- Audio-Eingaenge ---
@@ -649,6 +820,31 @@ function applySource() {
   }
 }
 
+// Steuerelement-Zustand je nach Betriebsart (Clock vs. Noten-Modus).
+function applyModeControls() {
+  const note = opMode !== 'clock';
+  elMin.disabled = note; elMax.disabled = note; elKeyToggle.disabled = note;
+}
+function applyMode() {
+  opMode = elMode.value;
+  const note = opMode !== 'clock';
+  applyModeControls();
+  elBpmCap.textContent = note ? (opMode === 'poly' ? 'NOTEN' : 'NOTE') : 'BPM';
+  elBpm.classList.toggle('notes', note);
+  setBpmText('—');
+  if (note) elKeyBlock.style.display = 'none';
+  else if (keyEnabled) elKeyBlock.style.display = '';
+  if (opMode === 'mono') {
+    setHint('Monophon: erkennt EINE Note (Gesang/Bass/Lead/einzelnes Instrument) und sendet '
+          + 'sie als MIDI-Note. Klare, einstimmige Quelle nötig. MIDI-Ausgang wählen.');
+  } else if (opMode === 'poly') {
+    setHint('Polyphon: erkennt mehrere Noten gleichzeitig (begrenzte Genauigkeit, etwas höhere '
+          + 'Latenz). MIDI-Ausgang wählen.');
+  } else {
+    applySource();
+  }
+}
+
 // Liefert den MediaStream je nach Quelle. 'display' nutzt die Screen-Capture-
 // API (getDisplayMedia): erfasst Tab-/System-Audio. Chrome verlangt dabei
 // einen Video-Track -> wir fordern ihn an, schalten ihn aber ab (enabled=false)
@@ -703,26 +899,42 @@ async function start() {
     if (running) { stop(); setHint('Mithören/Aufnahme beendet (Quelle gestoppt).'); }
   });
 
+  const noteMode = opMode !== 'clock';
   try {
     audioCtx = new AudioContext();
     await audioCtx.resume();
-    analyzer = new TempoAnalyzer(audioCtx.sampleRate, minBpm, maxBpm);
+    const sr = audioCtx.sampleRate;
+
+    if (noteMode) {
+      noteEngine = new NoteEngine(sr, opMode === 'poly',
+        (bytes) => { if (midiOut) { try { midiOut.send(bytes); } catch (e) {} } });
+    } else {
+      analyzer = new TempoAnalyzer(sr, minBpm, maxBpm);
+    }
 
     const src = audioCtx.createMediaStreamSource(mediaStream);
     // ScriptProcessorNode statt AudioWorklet: laedt kein Modul -> auch unter
-    // file:// nutzbar. Mono-Downmix, in HOP_SIZE-grosse Bloecke schneiden.
-    procNode = audioCtx.createScriptProcessor(2048, 1, 1);
+    // file:// nutzbar. Im Noten-Modus kleinere Bloecke (geringere Latenz).
+    const bufSize = noteMode ? 1024 : 2048;
+    procNode = audioCtx.createScriptProcessor(bufSize, 1, 1);
     procNode.onaudioprocess = (ev) => {
-      const buf = ev.inputBuffer;
-      const chs = buf.numberOfChannels, n = buf.length;
+      const ib = ev.inputBuffer;
+      const chs = ib.numberOfChannels, n = ib.length;
       const mono = new Float32Array(n);
       for (let c = 0; c < chs; c++) {
-        const d = buf.getChannelData(c);
+        const d = ib.getChannelData(c);
         for (let i = 0; i < n; i++) mono[i] += d[i];
       }
       if (chs > 1) for (let i = 0; i < n; i++) mono[i] /= chs;
-      for (let off = 0; off + HOP_SIZE <= n; off += HOP_SIZE) {
-        onChunk(mono.subarray(off, off + HOP_SIZE));
+      if (noteMode) {
+        let sum = 0; for (let i = 0; i < n; i++) sum += mono[i] * mono[i];
+        const rms = Math.sqrt(sum / n);
+        levelEma = 0.85 * levelEma + 0.15 * rms;
+        lastChunkTime = performance.now();
+        noteEngine.push(mono);
+        noteEngine.process(rms);
+      } else {
+        for (let off = 0; off + HOP_SIZE <= n; off += HOP_SIZE) onChunk(mono.subarray(off, off + HOP_SIZE));
       }
     };
     src.connect(procNode);
@@ -737,26 +949,31 @@ async function start() {
     setStatus('FEHLER');
     if (audioCtx) { try { await audioCtx.close(); } catch (_) {} audioCtx = null; }
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
-    procNode = null; sinkNode = null; analyzer = null;
+    procNode = null; sinkNode = null; analyzer = null; noteEngine = null;
     return;
   }
 
   estimates = []; lastRaw = 0; levelEma = 0; haveEstimate = false;
   resetKey();
-  clock.enable();
-  analyzeTimer = setInterval(analyze, ANALYSIS_INTERVAL * 1000);
+  if (!noteMode) {
+    clock.enable();
+    analyzeTimer = setInterval(analyze, ANALYSIS_INTERVAL * 1000);
+  }
   lastChunkTime = performance.now();
   running = true;
   elStart.textContent = 'Stopp';
   elStart.classList.add('stop');
   setControlsDisabled(true);
-  setHint('Laeuft. Tab im Vordergrund lassen, damit die Clock stabil bleibt.');
+  setHint(noteMode
+    ? 'Läuft – erkannte Noten werden an den MIDI-Ausgang gesendet. Tab im Vordergrund lassen.'
+    : 'Laeuft. Tab im Vordergrund lassen, damit die Clock stabil bleibt.');
 }
 
 function stop() {
   running = false;
   if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null; }
   clock.disable();
+  if (noteEngine) { noteEngine.allOff(); noteEngine = null; }
   if (procNode) { procNode.disconnect(); procNode.onaudioprocess = null; procNode = null; }
   if (sinkNode) { sinkNode.disconnect(); sinkNode = null; }
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
@@ -768,8 +985,9 @@ function stop() {
   elStart.classList.remove('stop');
   setControlsDisabled(false);
   applySource();                      // Eingangsfelder je nach Quelle wieder richtig
+  applyModeControls();                // BPM-/Tonart-Felder je nach Betriebsart
   setBpmText('—');
-  elRaw.textContent = 'roh: —';
+  elRaw.textContent = opMode === 'clock' ? 'roh: —' : '';
   setStatus('bereit');
   updateLevel(-60);
 }
@@ -858,7 +1076,15 @@ function render() {
   if (running) {
     const db = levelEma > 0 ? 20 * Math.log10(levelEma) : -120;
     updateLevel(db);
-    if (performance.now() - lastChunkTime > 1500) {
+    if (opMode !== 'clock') {
+      // Noten-Modus: aktuell gesendete Note(n) anzeigen
+      if (performance.now() - lastChunkTime > 1500) setStatus('KEIN AUDIO – Eingang prüfen');
+      else setStatus(opMode === 'poly' ? 'Noten-Modus (polyphon)' : 'Noten-Modus (monophon)');
+      const disp = noteEngine ? noteEngine.display : '—';
+      elBpm.textContent = disp;
+      elBpm.classList.toggle('idle', disp === '—');
+      elRaw.textContent = '';
+    } else if (performance.now() - lastChunkTime > 1500) {
       setStatus('KEIN AUDIO – Eingang prüfen'); setBpmText('—');
     } else if (db < SILENCE_DB) {
       setStatus('KEIN SIGNAL'); setBpmText('—');
@@ -866,8 +1092,8 @@ function render() {
       setStatus('analysiere …'); setBpmText('—');
     } else {
       setStatus('laeuft'); setBpmText(String(Math.round(median(estimates))));
+      elRaw.textContent = 'roh: ' + (lastRaw ? lastRaw.toFixed(1) : '—');
     }
-    elRaw.textContent = 'roh: ' + (lastRaw ? lastRaw.toFixed(1) : '—');
   }
   if (keyEnabled) updateKeyDisplay();
   requestAnimationFrame(render);
@@ -890,7 +1116,7 @@ function updateLevel(db) {
   elDb.textContent = (db <= -60 ? '-60' : db.toFixed(0)) + ' dB';
 }
 function setControlsDisabled(on) {
-  elSource.disabled = on; elInput.disabled = on; elLoad.disabled = on;
+  elMode.disabled = on; elSource.disabled = on; elInput.disabled = on; elLoad.disabled = on;
   elMin.disabled = on; elMax.disabled = on;
 }
 
@@ -901,6 +1127,7 @@ elLoad.addEventListener('click', () => { inputsUnlocked = false; unlockInputs();
 elInput.addEventListener('focus', () => { if (!inputsUnlocked) unlockInputs(); });
 elMidi.addEventListener('focus', initMidi);
 elSource.addEventListener('change', applySource);
+elMode.addEventListener('change', applyMode);
 elKeyToggle.addEventListener('click', () => {
   keyEnabled = !keyEnabled;
   elKeyBlock.style.display = keyEnabled ? '' : 'none';

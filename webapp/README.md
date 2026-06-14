@@ -2,8 +2,9 @@
 
 Eine schlanke Browser-Variante des Projekts: Tempo-Erkennung (BPM) mit
 **stabiler MIDI-Clock-Ausgabe** (24 PPQN), optional auch die **Grundtonart**
-(mit Paralleltonart). Als Quelle dient ein Audio-Eingang **oder** die
-**mitgehörte Wiedergabe** (Tab-/System-Audio). Keine Installation, kein
+(mit Paralleltonart). Ein **Noten-Modus** sendet erkannte Tonhöhen direkt als
+MIDI-Noten (mono- oder polyphon). Als Quelle dient ein Audio-Eingang **oder**
+die **mitgehörte Wiedergabe** (Tab-/System-Audio). Keine Installation, kein
 Python, kein Server -- die ganze App steckt in einer einzigen Datei:
 **`index.html`**.
 
@@ -31,6 +32,23 @@ Dann:
 Die große Zahl zeigt das erkannte Tempo; die MIDI-Clock startet automatisch
 mit der ersten stabilen Schätzung (MIDI `start`) und hält bei Stille an
 (`stop`).
+
+## Noten-Modus (Pitch → MIDI)
+
+Über **„Modus"** lässt sich von „Tempo & MIDI-Clock" auf einen Noten-Modus
+umschalten, der erkannte Tonhöhen direkt als **MIDI-Noten** (Note On/Off) an
+den gewählten Ausgang sendet. In diesem Modus laufen BPM-/Tonart-/Clock-
+Schritte bewusst **nicht** mit – für möglichst geringe Latenz.
+
+- **Monophon:** erkennt jeweils EINE Note (Gesang, Bass, Lead, einzelnes
+  Instrument, Pfeifen) per YIN-Tonhöhenerkennung. Geringe Latenz, gute
+  Treffsicherheit – braucht aber eine klar einstimmige Quelle.
+- **Polyphon:** erkennt mehrere Noten gleichzeitig per FFT-Peak-Analyse mit
+  Oberton-Unterdrückung. Etwas höhere Latenz (größeres Analysefenster) und
+  begrenzte Genauigkeit; bei dichter/komplexer Musik nur ein grober Eindruck.
+
+Velocity wird aus dem Pegel abgeleitet, gesendet wird auf MIDI-Kanal 1.
+Beim Stoppen/Umschalten werden alle offenen Noten beendet (Note Off).
 
 ## Wiedergabe mithören (Loopback)
 
