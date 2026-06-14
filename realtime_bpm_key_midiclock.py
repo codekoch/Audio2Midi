@@ -480,6 +480,7 @@ class Shared:
         self.beat_anchor = 0.0    # perf_counter-Zeit eines erkannten Beats
         self.beat_period = 0.0    # Beat-Abstand in Sekunden
         self.beat_valid_time = 0.0  # wann der Anker zuletzt erneuert wurde
+        self.note_display = "—"   # aktuelle Note(n) im Noten-Modus (Anzeige)
 
 
 # ===========================================================================
@@ -1600,6 +1601,243 @@ def analysis_worker_safe(shared, audio_q, stop_event):
 
 
 # ===========================================================================
+# Noten-Modus: Pitch -> MIDI (monophon: YIN, polyphon: FFT-Peaks)
+# ===========================================================================
+# Sendet erkannte Tonhoehen direkt als MIDI-Noten. In diesem Modus laufen die
+# teuren Analyseschritte (HPSS/Chroma/Tempo/Clock) bewusst NICHT mit, damit
+# die Latenz so gering wie moeglich bleibt.
+NOTE_CHANNEL     = 0       # MIDI-Kanal 1
+NOTE_MIN_MIDI    = 36      # C2
+NOTE_MAX_MIDI    = 96      # C7
+NOTE_SILENCE_RMS = 0.004   # ~ -48 dBFS: darunter keine Note
+YIN_THRESHOLD    = 0.15    # YIN-Schwelle (kleiner = strenger)
+NOTE_WIN_MONO    = 2048    # YIN-Analysefenster
+NOTE_WIN_POLY    = 4096    # FFT-Fenster fuer den polyphonen Pfad
+NOTE_BLOCKSIZE   = 512     # kleine Capture-Bloecke -> geringe Latenz (Eingang)
+NOTE_MAX_POLY    = 6       # max. gleichzeitige Noten
+
+
+def midi_name(m):
+    return NOTE_NAMES[m % 12] + str(m // 12 - 1)
+
+
+def vel_from_level(level):
+    db = 20.0 * math.log10(level) if level > 0 else -90.0
+    return int(max(1, min(127, round((db + 54.0) / 48.0 * 127.0))))
+
+
+def yin_pitch(buf, sr, threshold=YIN_THRESHOLD):
+    """Monophone Tonhoehe per YIN. Rueckgabe Frequenz in Hz oder 0.0.
+
+    Schnelle, vektorisierte Differenzfunktion ueber die Autokorrelation:
+    d(tau) = sum(x[i]^2) + sum(x[i+tau]^2) - 2*sum(x[i]*x[i+tau]).
+    """
+    n = len(buf)
+    W = n // 2
+    x = buf.astype(np.float64)
+    pe = np.concatenate(([0.0], np.cumsum(x * x)))
+    t1 = pe[W] - pe[0]
+    taus = np.arange(W)
+    t2 = pe[taus + W] - pe[taus]
+    size = 1
+    while size < n + W:
+        size <<= 1
+    fa = np.fft.rfft(x[:W], size)
+    fx = np.fft.rfft(x, size)
+    corr = np.fft.irfft(np.conj(fa) * fx, size)
+    t3 = corr[:W]
+    d = t1 + t2 - 2.0 * t3
+    np.clip(d, 0.0, None, out=d)
+    cmnd = np.empty(W)
+    cmnd[0] = 1.0
+    csum = np.cumsum(d[1:])
+    cmnd[1:] = d[1:] * np.arange(1, W) / np.where(csum > 0, csum, 1.0)
+    below = np.where(cmnd[2:] < threshold)[0]
+    if below.size == 0:
+        return 0.0
+    tau = int(below[0]) + 2
+    while tau + 1 < W and cmnd[tau + 1] < cmnd[tau]:
+        tau += 1
+    bt = float(tau)
+    if 1 < tau < W - 1:
+        s0, s1, s2 = cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]
+        denom = 2.0 * (2.0 * s1 - s2 - s0)
+        if denom != 0:
+            bt = tau + (s2 - s0) / denom
+    return sr / bt if bt > 0 else 0.0
+
+
+class NoteDetector:
+    """Haelt ein rollendes Fenster, erkennt Tonhoehe(n) und meldet die noetigen
+    MIDI-Noten-Ereignisse ueber die uebergebene send(status, note, vel)."""
+
+    def __init__(self, sr, poly):
+        self.sr = float(sr)
+        self.poly = poly
+        self.win = NOTE_WIN_POLY if poly else NOTE_WIN_MONO
+        self.buf = np.zeros(self.win, dtype=np.float32)
+        self.filled = 0
+        self.cur = -1
+        self.cand = -1
+        self.cand_n = 0
+        self.active = {}                       # midi -> Frames ohne Beleg
+        self.han = np.hanning(self.win).astype(np.float32) if poly else None
+        self.display = "—"
+
+    def push(self, x):
+        h = len(x)
+        if h >= self.win:
+            self.buf[:] = x[-self.win:]
+            self.filled = self.win
+        else:
+            self.buf[:-h] = self.buf[h:]
+            self.buf[-h:] = x
+            self.filled = min(self.win, self.filled + h)
+
+    def process(self, level, send):
+        if self.filled < self.win:
+            return
+        if self.poly:
+            self._poly(level, send)
+        else:
+            self._mono(level, send)
+
+    def _mono(self, level, send):
+        note = -1
+        if level > NOTE_SILENCE_RMS:
+            f = yin_pitch(self.buf, self.sr)
+            if f > 0:
+                m = int(round(69 + 12 * math.log2(f / 440.0)))
+                if NOTE_MIN_MIDI <= m <= NOTE_MAX_MIDI:
+                    note = m
+        if note == -1:
+            if self.cur != -1:
+                send(0x80, self.cur, 0)
+                self.cur = -1
+            self.cand = -1
+            self.cand_n = 0
+            self.display = "—"
+            return
+        if note == self.cur:
+            self.cand = -1
+            self.cand_n = 0
+            return
+        if note == self.cand:
+            self.cand_n += 1
+        else:
+            self.cand = note
+            self.cand_n = 1
+        need = 1 if self.cur == -1 else 2      # aus Stille sofort, Wechsel entprellen
+        if self.cand_n >= need:
+            if self.cur != -1:
+                send(0x80, self.cur, 0)
+            send(0x90, note, vel_from_level(level))
+            self.cur = note
+            self.cand = -1
+            self.cand_n = 0
+            self.display = midi_name(note)
+
+    def _poly(self, level, send):
+        detected = set()
+        if level > NOTE_SILENCE_RMS:
+            mag = np.abs(np.fft.rfft(self.buf * self.han))
+            mx = float(mag.max()) if mag.size else 0.0
+            if mx > 0:
+                thr = mx * 0.12
+                inner = mag[1:-1]
+                idx = np.where((inner > thr) & (inner > mag[:-2]) &
+                               (inner >= mag[2:]))[0] + 1
+                peaks = []
+                for k in idx:
+                    a, b, c = mag[k - 1], mag[k], mag[k + 1]
+                    denom = a - 2.0 * b + c
+                    delta = 0.5 * (a - c) / denom if denom != 0 else 0.0
+                    freq = (k + delta) * self.sr / self.win
+                    peaks.append((float(b), float(freq)))
+                peaks.sort(reverse=True)
+                accepted = []
+                for _b, freq in peaks:
+                    if len(accepted) >= NOTE_MAX_POLY:
+                        break
+                    if freq <= 0:
+                        continue
+                    m = int(round(69 + 12 * math.log2(freq / 440.0)))
+                    if not (NOTE_MIN_MIDI <= m <= NOTE_MAX_MIDI) or m in detected:
+                        continue
+                    harmonic = False               # Oberton eines staerkeren Grundtons?
+                    for af in accepted:
+                        r = freq / af
+                        if r > 1.5 and abs(r - round(r)) < 0.04:
+                            harmonic = True
+                            break
+                    if harmonic:
+                        continue
+                    accepted.append(freq)
+                    detected.add(m)
+        vel = vel_from_level(level)
+        for m in detected:
+            if m not in self.active:
+                send(0x90, m, vel)
+            self.active[m] = 0
+        for m in list(self.active):                # Note-Off mit 1 Frame Nachsicht
+            if m in detected:
+                continue
+            if self.active[m] >= 1:
+                send(0x80, m, 0)
+                del self.active[m]
+            else:
+                self.active[m] += 1
+        on = sorted(m for m, miss in self.active.items() if miss == 0)
+        self.display = " ".join(midi_name(m) for m in on) if on else "—"
+
+    def all_off(self, send):
+        if self.cur != -1:
+            send(0x80, self.cur, 0)
+            self.cur = -1
+        for m in list(self.active):
+            send(0x80, m, 0)
+        self.active.clear()
+        self.display = "—"
+
+
+def note_worker(shared, audio_q, midi_out, stop_event, poly):
+    """Verbraucht die Capture-Bloecke (wie der Analyse-Worker) und sendet
+    erkannte Tonhoehen als MIDI-Noten -- ohne die teure Tempo-/Tonart-Analyse."""
+    with shared.lock:
+        sr = shared.capture_sr
+    det = NoteDetector(sr, poly)
+
+    def send(status, note, vel):
+        if midi_out is None:
+            return
+        try:
+            if status == 0x90:
+                midi_out.send(mido.Message('note_on', channel=NOTE_CHANNEL,
+                                           note=note, velocity=vel))
+            else:
+                midi_out.send(mido.Message('note_off', channel=NOTE_CHANNEL,
+                                           note=note, velocity=0))
+        except Exception:
+            pass
+
+    try:
+        while not stop_event.is_set():
+            try:
+                block = audio_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if block is None or len(block) == 0:
+                continue
+            rms = float(np.sqrt(np.mean(np.square(block, dtype=np.float64))))
+            det.push(np.asarray(block, dtype=np.float32))
+            det.process(rms, send)
+            with shared.lock:
+                shared.note_display = det.display
+    finally:
+        det.all_off(send)
+
+
+# ===========================================================================
 # Praezises Warten + MIDI-Clock
 # ===========================================================================
 def precise_sleep_until(target_perf, stop_event):
@@ -2171,8 +2409,12 @@ def drain_queue(q):
         pass
 
 
-def start_capture(mode, source, capture_sr, audio_q, monitor_q, shared):
-    """Startet die Aufnahme. Rueckgabe: (stream, thread, cap_stop)."""
+def start_capture(mode, source, capture_sr, audio_q, monitor_q, shared,
+                  blocksize=AUDIO_BLOCKSIZE):
+    """Startet die Aufnahme. Rueckgabe: (stream, thread, cap_stop).
+
+    blocksize: kleinere Bloecke (z. B. NOTE_BLOCKSIZE) senken die Latenz im
+    Noten-Modus; im Clock-Modus bleibt es bei AUDIO_BLOCKSIZE."""
     cap_stop = threading.Event()
     if mode == "1":
         def audio_callback(indata, frames, time_info, status):
@@ -2183,7 +2425,7 @@ def start_capture(mode, source, capture_sr, audio_q, monitor_q, shared):
 
         stream = sd.InputStream(
             device=source, channels=1, samplerate=int(capture_sr),
-            dtype='float32', blocksize=AUDIO_BLOCKSIZE, callback=audio_callback)
+            dtype='float32', blocksize=int(blocksize), callback=audio_callback)
         stream.start()
         return stream, None, cap_stop
     else:
@@ -2310,6 +2552,25 @@ class KeyPoller:
         return None
 
 
+def choose_run_mode(midi_name):
+    """Betriebsart: Tempo/Clock oder Noten-Modus (mono/poly).
+    Rueckgabe 'clock' | 'mono' | 'poly'."""
+    print("\nBetriebsart waehlen:")
+    print("  [1] Tempo & MIDI-Clock (Standard)")
+    print("  [2] Noten -> MIDI, monophon (eine Note; geringe Latenz)")
+    print("  [3] Noten -> MIDI, polyphon (mehrere Noten; etwas hoehere Latenz)")
+    while True:
+        sel = input("Modus (1/2/3): ").strip()
+        if sel in ("1", "2", "3"):
+            break
+        print("Bitte 1, 2 oder 3 eingeben.")
+    mode = {"1": "clock", "2": "mono", "3": "poly"}[sel]
+    if mode != "clock" and not midi_name:
+        print("Hinweis: Im Noten-Modus ohne MIDI-Ausgang werden keine Noten "
+              "gesendet (nur Anzeige).")
+    return mode
+
+
 # ===========================================================================
 # Hauptprogramm
 # ===========================================================================
@@ -2333,9 +2594,13 @@ def main():
     monitor_q = queue.Queue()          # immer vorhanden; Capture speist sie stets
     stop_event = threading.Event()
 
-    # ---- Quelle + MIDI + Mithören waehlen ----
+    # ---- Quelle + MIDI + Betriebsart + Mithören waehlen ----
     mode, source, capture_sr, src_desc = choose_capture_source()
     midi_name = choose_midi_output()
+    run_mode = choose_run_mode(midi_name)
+    note_mode = run_mode != "clock"
+    poly = run_mode == "poly"
+    cap_bs = NOTE_BLOCKSIZE if note_mode else AUDIO_BLOCKSIZE
     monitor_exclude = source.name if mode == "2" else ""
     monitor_index = choose_monitor_output(monitor_exclude)
 
@@ -2346,15 +2611,17 @@ def main():
         sys.exit(f"MIDI-Ausgang fehlgeschlagen: {e}")
 
     # librosa/numba einmalig "aufwaermen" (sonst dauert der erste echte Analyse-
-    # Aufruf mehrere Sekunden, was Pegel/Analyse anfangs blockiert wirken laesst).
-    print("\nInitialisiere Analyse (einmalig, kann kurz dauern) ...")
-    try:
-        _warm = np.zeros(int(ANALYSIS_SR * WINDOW_SECONDS), dtype=np.float32)
-        _warm[::ANALYSIS_SR // 4] = 0.5     # ein paar Onsets
-        estimate_tempo(_warm, ANALYSIS_SR)
-        chroma_pcp(_warm, ANALYSIS_SR)
-    except Exception:
-        pass
+    # Aufruf mehrere Sekunden). Im Noten-Modus unnoetig -- dort laeuft keine
+    # Tempo-/Tonart-Analyse.
+    if not note_mode:
+        print("\nInitialisiere Analyse (einmalig, kann kurz dauern) ...")
+        try:
+            _warm = np.zeros(int(ANALYSIS_SR * WINDOW_SECONDS), dtype=np.float32)
+            _warm[::ANALYSIS_SR // 4] = 0.5     # ein paar Onsets
+            estimate_tempo(_warm, ANALYSIS_SR)
+            chroma_pcp(_warm, ANALYSIS_SR)
+        except Exception:
+            pass
 
     stream = loopback_thread = cap_stop = None
     monitor_out = monitor_thread = mon_stop = None
@@ -2367,24 +2634,38 @@ def main():
                 monitor_index, capture_sr, monitor_q)
         try:
             stream, loopback_thread, cap_stop = start_capture(
-                mode, source, capture_sr, audio_q, monitor_q, shared)
+                mode, source, capture_sr, audio_q, monitor_q, shared,
+                blocksize=cap_bs)
         except Exception as e:
             sys.exit(f"Konnte die Quelle nicht oeffnen: {e}")
 
-        analysis_thread = threading.Thread(
-            target=analysis_worker_safe, args=(shared, audio_q, stop_event),
-            daemon=True)
-        clock_thread = threading.Thread(
-            target=clock_worker, args=(shared, midi_out, stop_event), daemon=True)
-        analysis_thread.start()
-        clock_thread.start()
+        # Noten-Modus: nur der schlanke Noten-Worker, KEINE Tempo-/Tonart-
+        # Analyse und KEINE Clock (minimale Latenz). Sonst der Normalbetrieb.
+        analysis_thread = clock_thread = note_thread = None
+        if note_mode:
+            note_thread = threading.Thread(
+                target=note_worker,
+                args=(shared, audio_q, midi_out, stop_event, poly), daemon=True)
+            note_thread.start()
+        else:
+            analysis_thread = threading.Thread(
+                target=analysis_worker_safe, args=(shared, audio_q, stop_event),
+                daemon=True)
+            clock_thread = threading.Thread(
+                target=clock_worker, args=(shared, midi_out, stop_event), daemon=True)
+            analysis_thread.start()
+            clock_thread.start()
 
         keys = KeyPoller()
         hotkeys = ("[i] Eingang wechseln   [o] Mithör-Ausgang   "
                    "[s] Signal-Scan   [?] Hilfe   [q] Beenden"
                    if keys.available else "(Beenden mit Strg+C)")
+        mode_desc = {"clock": "Tempo & MIDI-Clock",
+                     "mono": "Noten -> MIDI (monophon)",
+                     "poly": "Noten -> MIDI (polyphon)"}[run_mode]
         print(f"\nQuelle: {src_desc}")
         print(f"MIDI-Ausgang: {midi_output_desc(midi_name)}")
+        print(f"Betriebsart: {mode_desc}")
         print(f"Mithören: {monitor_desc}")
         print(f"Tasten: {hotkeys}\n")
         keys.resume()
@@ -2399,21 +2680,28 @@ def main():
                 level = shared.level
                 level_time = shared.level_time
                 have = shared.have_estimate
+                note_disp = shared.note_display
             # Pegel abklingen lassen, wenn keine frischen Bloecke mehr kommen
             age = time.perf_counter() - level_time
             if age > 0.3:
                 level *= math.exp(-(age - 0.3) / 0.4)
             db, bar = level_bar(level)
-            if db <= -55.0:
-                status = "KEIN SIGNAL"
-            elif not have:
-                status = "analysiere ..."
+            if note_mode:
+                tag = "poly" if poly else "mono"
+                print(f"\rNoten ({tag}): {note_disp:24s} | "
+                      f"Pegel: {db:5.0f}dB [{bar}]",
+                      end="", flush=True)
             else:
-                status = "laeuft"
-            key_txt = key + ("" if key_conf or key == "—" else "?")
-            print(f"\rBPM: {bpm:6.1f} | roh: {raw:6.1f} | Tonart: {key_txt:9s} | "
-                  f"Pegel: {db:5.0f}dB [{bar}] | {status:<14}",
-                  end="", flush=True)
+                if db <= -55.0:
+                    status = "KEIN SIGNAL"
+                elif not have:
+                    status = "analysiere ..."
+                else:
+                    status = "laeuft"
+                key_txt = key + ("" if key_conf or key == "—" else "?")
+                print(f"\rBPM: {bpm:6.1f} | roh: {raw:6.1f} | Tonart: {key_txt:9s} | "
+                      f"Pegel: {db:5.0f}dB [{bar}] | {status:<14}",
+                      end="", flush=True)
 
             # ---------- Tastatur ----------
             ch = keys.poll()
@@ -2453,7 +2741,8 @@ def main():
                                 start_monitor(monitor_index, capture_sr, monitor_q)
                         try:
                             stream, loopback_thread, cap_stop = start_capture(
-                                mode, source, capture_sr, audio_q, monitor_q, shared)
+                                mode, source, capture_sr, audio_q, monitor_q,
+                                shared, blocksize=cap_bs)
                         except Exception as e:
                             print(f"Konnte neue Quelle nicht oeffnen: {e}")
                             stream = loopback_thread = None

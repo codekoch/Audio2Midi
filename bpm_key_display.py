@@ -77,6 +77,12 @@ if sys.platform == 'win32':
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "display_config.json")
 
+# Betriebsart: Tempo/Clock oder Noten-Modus (Pitch -> MIDI)
+MODE_LABELS = {"clock": "Tempo & MIDI-Clock",
+               "mono": "Noten → MIDI (monophon)",
+               "poly": "Noten → MIDI (polyphon)"}
+MODE_FROM_LABEL = {v: k for k, v in MODE_LABELS.items()}
+
 # Farbschema (dunkles Kiosk-Display)
 COL_BG      = "#16161a"   # Hintergrund
 COL_FG      = "#F1EFE8"   # Hauptschrift (BPM)
@@ -141,6 +147,8 @@ class DisplayApp:
         self.cap_stop = None
         self.clock_stop = None
         self.clock_thread = None
+        self.note_stop = None                 # Noten-Modus: Worker-Stop-Event
+        self.note_thread = None
         self.midi_out = None
         self.midi_name = None
         self.warmed = False
@@ -202,6 +210,8 @@ class DisplayApp:
         cfg = load_config()
         self.opt_bpm_decimal = bool(cfg.get("bpm_dezimal", False))
         self.opt_beat_sync = bool(cfg.get("beat_sync", False))
+        mode = cfg.get("note_mode", "clock")
+        self.opt_note_mode = mode if mode in MODE_LABELS else "clock"
         self.opt_chords = bool(cfg.get("akkorde", False))
         self.opt_chord_log = bool(cfg.get("akkorde_datei", False))
         self.opt_chord_fast = bool(cfg.get("akkorde_schnell", False))
@@ -273,8 +283,9 @@ class DisplayApp:
         self.bpm_label = tk.Label(f, text="—", font=self.f_bpm,
                                   bg=COL_BG, fg=COL_FG)
         self.bpm_label.grid(row=2, column=0)
-        tk.Label(f, text="BPM", font=self.f_cap,
-                 bg=COL_BG, fg=COL_MUTED).grid(row=3, column=0)
+        self.bpm_cap_label = tk.Label(f, text="BPM", font=self.f_cap,
+                                      bg=COL_BG, fg=COL_MUTED)
+        self.bpm_cap_label.grid(row=3, column=0)
 
         # Tonart und (optional) Akkord nebeneinander, je mit eigener
         # Beschriftung; der Akkord-Block wird in show_main() nur gepackt,
@@ -409,7 +420,19 @@ class DisplayApp:
                  fg=COL_MUTED).pack(side="left", padx=4)
         self.ent_max = tk.Entry(rng, **ent)
         self.ent_max.pack(side="left", ipady=3)
+        # Betriebsart: Tempo/Clock oder Noten-Modus (Pitch -> MIDI)
+        self.var_mode = tk.StringVar(value=MODE_LABELS["clock"])
+        modef = tk.Frame(cont, bg=COL_BG)
+        tk.Label(modef, text="Modus", font=self.f_small, bg=COL_BG,
+                 fg=COL_MUTED).pack(side="left", padx=(0, 6))
+        om = tk.OptionMenu(modef, self.var_mode, *MODE_LABELS.values())
+        om.config(font=self.f_small, bg=COL_SURFACE, fg=COL_FG, bd=0,
+                  highlightthickness=0, activebackground=COL_SURF_HI,
+                  activeforeground=COL_FG, cursor="hand2")
+        om["menu"].config(bg=COL_SURFACE, fg=COL_FG)
+        om.pack(side="left")
         self.opt_widgets = [
+            modef,
             tk.Checkbutton(cont, text="BPM mit Nachkommastelle",
                            variable=self.var_dec, **ck),
             tk.Checkbutton(cont, text="Beat-synchrone Clock (experimentell)",
@@ -549,6 +572,7 @@ class DisplayApp:
         self.var_chord.set(self.opt_chords)
         self.var_chordlog.set(self.opt_chord_log)
         self.var_chordfast.set(self.opt_chord_fast)
+        self.var_mode.set(MODE_LABELS.get(self.opt_note_mode, MODE_LABELS["clock"]))
         self.ent_min.delete(0, "end")
         self.ent_min.insert(0, f"{self.opt_min_bpm:.0f}")
         self.ent_max.delete(0, "end")
@@ -640,6 +664,7 @@ class DisplayApp:
                      "akkorde": bool(self.var_chord.get()),
                      "akkorde_datei": bool(self.var_chordlog.get()),
                      "akkorde_schnell": bool(self.var_chordfast.get()),
+                     "note_mode": MODE_FROM_LABEL.get(self.var_mode.get(), "clock"),
                      "min_bpm": mn, "max_bpm": mx})
         self._load_options()
         self.start_session((kind, ident), midi)
@@ -714,9 +739,14 @@ class DisplayApp:
             self.shared.beat_sync = self.opt_beat_sync
         core.drain_queue(self.audio_q)
 
+        note_mode = self.opt_note_mode != "clock"
+        poly = self.opt_note_mode == "poly"
+        cap_bs = core.NOTE_BLOCKSIZE if note_mode else core.AUDIO_BLOCKSIZE
+
         try:
             self.stream, self.cap_thread, self.cap_stop = core.start_capture(
-                mode, source_arg, sr, self.audio_q, None, self.shared)
+                mode, source_arg, sr, self.audio_q, None, self.shared,
+                blocksize=cap_bs)
         except Exception as e:
             self.status_override = None
             self.show_setup(error=f"Quelle konnte nicht geoeffnet werden: {e}")
@@ -734,17 +764,29 @@ class DisplayApp:
                 self.show_setup(error=f"MIDI-Ausgang fehlgeschlagen: {e}")
                 return
 
-        self.clock_stop = threading.Event()
-        self.clock_thread = threading.Thread(
-            target=core.clock_worker,
-            args=(self.shared, self.midi_out, self.clock_stop), daemon=True)
-        self.clock_thread.start()
+        if note_mode:
+            # Noten-Modus: nur der schlanke Noten-Worker, KEINE Tempo-/Tonart-
+            # Analyse und KEINE Clock (minimale Latenz).
+            with self.shared.lock:
+                self.shared.note_display = "—"
+            self.note_stop = threading.Event()
+            self.note_thread = threading.Thread(
+                target=core.note_worker,
+                args=(self.shared, self.audio_q, self.midi_out, self.note_stop,
+                      poly), daemon=True)
+            self.note_thread.start()
+        else:
+            self.clock_stop = threading.Event()
+            self.clock_thread = threading.Thread(
+                target=core.clock_worker,
+                args=(self.shared, self.midi_out, self.clock_stop), daemon=True)
+            self.clock_thread.start()
 
-        if self.analysis_thread is None:
-            self.analysis_thread = threading.Thread(
-                target=core.analysis_worker_safe,
-                args=(self.shared, self.audio_q, self.app_stop), daemon=True)
-            self.analysis_thread.start()
+            if self.analysis_thread is None:
+                self.analysis_thread = threading.Thread(
+                    target=core.analysis_worker_safe,
+                    args=(self.shared, self.audio_q, self.app_stop), daemon=True)
+                self.analysis_thread.start()
 
         if len(name) > 38:
             name = name[:37] + "…"
@@ -766,6 +808,11 @@ class DisplayApp:
         if self.clock_thread is not None:
             self.clock_thread.join(timeout=1.5)
             self.clock_thread = self.clock_stop = None
+        if self.note_stop is not None:
+            self.note_stop.set()
+        if self.note_thread is not None:
+            self.note_thread.join(timeout=1.5)
+            self.note_thread = self.note_stop = None
         if self.midi_out is not None:
             try:
                 self.midi_out.close()
@@ -829,45 +876,71 @@ class DisplayApp:
             level = self.shared.level
             level_time = self.shared.level_time
             have = self.shared.have_estimate
+            note_disp = self.shared.note_display
 
         age = core.time.perf_counter() - level_time
         if age > 0.3:
             level *= core.math.exp(-(age - 0.3) / 0.4)
         db, _ = core.level_bar(level)
 
-        # BPM: gross und hell, sobald eine Schaetzung da ist; davor ein
-        # dezenter kleiner Platzhalter (das riesige "—" sah wie ein
-        # Renderfehler aus). Nachkommastelle nur, wenn als Option gewaehlt.
-        if have:
-            if not self._bpm_big:
-                self.bpm_label.config(font=self.f_bpm, fg=COL_FG)
-                self._bpm_big = True
-            self.bpm_label.config(
-                text=f"{bpm:.1f}" if self.opt_bpm_decimal else f"{bpm:.0f}")
-        else:
+        note_mode = self.opt_note_mode != "clock"
+        running = self.stream is not None or self.cap_thread is not None
+        if note_mode:
+            # Noten-Modus: aktuelle Note(n) in mittlerer Schrift; mehrere
+            # Namen passen sonst nicht in die BPM-Riesenschrift.
+            self.bpm_cap_label.config(
+                text="NOTEN" if self.opt_note_mode == "poly" else "NOTE")
             if self._bpm_big:
-                self.bpm_label.config(font=self.f_key, fg=COL_MUTED)
+                self.bpm_label.config(font=self.f_key)
                 self._bpm_big = False
-            self.bpm_label.config(text="—")
-        # Tonart: gedimmt, solange die Erkennung noch unsicher ist
-        self.key_label.config(text=key,
-                              fg=COL_ACCENT if key_conf else COL_MUTED)
-        par = parallel_key(key)
-        self.key_par_label.config(text=f"   {par}" if par else "")
-        if self.opt_chords:
-            self.chord_label.config(text=chord,
-                                    fg=COL_FG if chord != "—" else COL_MUTED)
+            shown = note_disp if running else "—"
+            self.bpm_label.config(
+                text=shown, fg=COL_ACCENT if (running and shown != "—") else COL_MUTED)
+            self.key_label.config(text="")
+            self.key_par_label.config(text="")
+            if self.opt_chords:
+                self.chord_label.config(text="")
+        else:
+            self.bpm_cap_label.config(text="BPM")
+            # BPM: gross und hell, sobald eine Schaetzung da ist; davor ein
+            # dezenter kleiner Platzhalter (das riesige "—" sah wie ein
+            # Renderfehler aus). Nachkommastelle nur, wenn als Option gewaehlt.
+            if have:
+                if not self._bpm_big:
+                    self.bpm_label.config(font=self.f_bpm, fg=COL_FG)
+                    self._bpm_big = True
+                self.bpm_label.config(
+                    text=f"{bpm:.1f}" if self.opt_bpm_decimal else f"{bpm:.0f}")
+            else:
+                if self._bpm_big:
+                    self.bpm_label.config(font=self.f_key, fg=COL_MUTED)
+                    self._bpm_big = False
+                self.bpm_label.config(text="—")
+            # Tonart: gedimmt, solange die Erkennung noch unsicher ist
+            self.key_label.config(text=key,
+                                  fg=COL_ACCENT if key_conf else COL_MUTED)
+            par = parallel_key(key)
+            self.key_par_label.config(text=f"   {par}" if par else "")
+            if self.opt_chords:
+                self.chord_label.config(text=chord,
+                                        fg=COL_FG if chord != "—" else COL_MUTED)
         self.db_label.config(text=f"{db:4.0f} dB")
 
         w = self.level_canvas.winfo_width()
         frac = max(0.0, min(1.0, (db + 60.0) / 60.0))
         self.level_canvas.coords(self.level_rect, 0, 0, int(w * frac), 14)
 
-        running = self.stream is not None or self.cap_thread is not None
         if self.status_override:
             self.status_label.config(text=self.status_override, fg=COL_MUTED)
         elif not running:
             self.status_label.config(text="", fg=COL_MUTED)
+        elif note_mode:
+            if db <= -55.0:
+                self.status_label.config(text="KEIN SIGNAL", fg=COL_WARN)
+            elif self.midi_out is not None:
+                self.status_label.config(text="● NOTEN → MIDI", fg=COL_OK)
+            else:
+                self.status_label.config(text="NOTEN (OHNE MIDI)", fg=COL_MUTED)
         elif self.hold:
             self.status_label.config(
                 text="ANGEHALTEN · CLOCK LAEUFT" if self.midi_out is not None
