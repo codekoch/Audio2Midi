@@ -74,6 +74,8 @@ button#startBtn {
 }
 button#startBtn.stop { background: var(--warn); color: #412402; }
 button#startBtn:disabled { opacity: .4; cursor: default; }
+.chk { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg); cursor: pointer; padding: 7px 0; }
+.chk input { accent-color: var(--accent); }
 main {
   flex: 1; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 4px; padding: 24px;
@@ -176,6 +178,12 @@ main {
       <button id="keyToggle" class="ghost"
               title="Grundtonart (mit Paralleltonart) anzeigen">anzeigen</button>
     </div>
+    <div class="field">
+      <label for="startStop">MIDI Start/Stop</label>
+      <label class="chk" title="MIDI Start/Stop senden? Aus = nur durchgehende Clock; du startest dein Gerät selbst.">
+        <input type="checkbox" id="startStop"> senden
+      </label>
+    </div>
     <button id="startBtn">Start</button>
   </section>
 
@@ -234,6 +242,11 @@ const TICK_MS       = 25;
 const SLEW_BPM_PER_S = 8.0;
 const DEADBAND_BPM  = 0.15;
 const MSG_CLOCK = 0xF8, MSG_START = 0xFA, MSG_STOP = 0xFC;
+// Beat-Phasenkopplung (PLL): die Clock rastet sanft auf das Beat-Raster des
+// Songs ein, damit ein synchronisiertes Geraet nicht wegdriftet.
+const BEAT_PLL_GAIN     = 0.2;    // Anteil des Phasenfehlers, der pro Beat korrigiert wird
+const BEAT_MAX_NUDGE_MS = 4.0;    // max. Phasenkorrektur pro Beat (kein hoerbarer Sprung)
+const BEAT_VALID_MS     = 4000;   // so lange gilt ein Beat-Anker als aktuell
 
 // Noten-Modus (Pitch -> MIDI)
 const NOTE_CH          = 0;       // MIDI-Kanal 1
@@ -241,6 +254,9 @@ const NOTE_MIN_MIDI    = 36;      // C2
 const NOTE_MAX_MIDI    = 96;      // C7
 const NOTE_SILENCE_RMS = 0.004;   // ~ -48 dBFS: darunter keine Note
 const YIN_THRESHOLD    = 0.15;    // YIN-Schwelle (kleiner = strenger)
+const POLY_HARMONICS   = 8;       // so viele Obertoene gehen in die Salienz ein
+const POLY_REL_THRESH  = 0.22;    // weitere Note nur, wenn Salienz >= Anteil der staerksten
+const NOTE_MAX_POLY    = 6;       // max. gleichzeitige Noten
 
 // ===========================================================================
 // Radix-2-FFT (in-place)
@@ -426,6 +442,31 @@ class TempoAnalyzer {
     if (denom !== 0) { const delta = 0.5 * (y0 - y2) / denom; if (delta > -1 && delta < 1) lag = bestLag + delta; }
     return { bpm: 60 * this.envRate / lag, conf: ratio };
   }
+  // Beat-Phase: Abstand (in Sekunden) vom Ende der Huellkurve zum letzten Beat.
+  // Sucht die Phase, bei der ein Puls-Raster im Beat-Abstand am besten auf die
+  // Onset-Spitzen faellt. null, wenn zu wenig Daten. Der konstante Mess-Versatz
+  // (Eingangslatenz) ist egal -- entscheidend ist, dass kein Drift entsteht.
+  beatPhase(bpm) {
+    const e = this.onset, L = e.length;
+    if (L < this.envRate * 2 || bpm <= 0) return null;
+    const P = 60 * this.envRate / bpm;          // Beat-Periode in Frames
+    if (P < 2) return null;
+    let mean = 0; for (let i = 0; i < L; i++) mean += e[i]; mean /= L;
+    const steps = Math.max(12, Math.round(P));
+    let bestOff = 0, bestScore = -Infinity;
+    for (let s = 0; s < steps; s++) {
+      const off = s * P / steps;
+      let score = 0;
+      for (let k = 0; ; k++) {
+        const idx = Math.round(L - 1 - off - k * P);
+        if (idx < 0) break;
+        const v = e[idx] - mean;
+        if (v > 0) score += v;                  // halbweg-gleichgerichtet
+      }
+      if (score > bestScore) { bestScore = score; bestOff = off; }
+    }
+    return bestOff / this.envRate;              // Sekunden seit letztem Beat
+  }
 }
 
 // ===========================================================================
@@ -491,12 +532,19 @@ class MidiClock {
     this.curBpm = 120;
     this.running = false;
     this.nextTick = 0;
+    this.tickInBeat = 0;          // 0..23; Tick 0 ist ein Beat
     this._lastSched = 0;
+    this.sendStartStop = false;   // MIDI Start/Stop senden? (Standard: nein)
+    // Beat-Anker (Phasenkopplung)
+    this.anchor = 0;              // performance.now-Zeit eines Song-Beats (ms)
+    this.period = 0;              // Beat-Abstand (ms)
+    this.anchorTime = 0;          // wann der Anker zuletzt aktualisiert wurde
+    this.anchorValid = false;
     this._timer = setInterval(() => this._schedule(), TICK_MS);
   }
   setOutput(output) {
     if (this.output === output) return;
-    if (this.running) this._send(MSG_STOP);
+    if (this.running && this.sendStartStop) this._send(MSG_STOP);
     this.running = false;
     this.output = output;
   }
@@ -507,10 +555,30 @@ class MidiClock {
   }
   disable() {
     this.enabled = false;
-    if (this.running) this._send(MSG_STOP);
+    if (this.running && this.sendStartStop) this._send(MSG_STOP);
     this.running = false;
+    this.anchorValid = false;
   }
   setTargetBpm(bpm) { this.targetBpm = bpm; }
+  // Song-Beat-Raster melden: anchorMs = Zeit eines Beats, periodMs = Beat-Abstand.
+  // Der Anker wird leicht geglaettet (auf das vorige Raster projiziert + EMA).
+  setBeat(anchorMs, periodMs) {
+    if (!(periodMs > 0)) return;
+    const now = performance.now();
+    if (this.anchorValid && (now - this.anchorTime) < BEAT_VALID_MS && this.period > 0) {
+      const m = Math.round((anchorMs - this.anchor) / periodMs);
+      const proj = this.anchor + m * periodMs;
+      this.anchor = proj + 0.4 * (anchorMs - proj);
+    } else {
+      this.anchor = anchorMs;
+    }
+    this.period = periodMs;
+    this.anchorTime = now;
+    this.anchorValid = true;
+  }
+  _beatActive(now) {
+    return this.anchorValid && this.period > 0 && (now - this.anchorTime) < BEAT_VALID_MS;
+  }
   _send(status, timestamp) {
     if (!this.output) return;
     try {
@@ -523,27 +591,48 @@ class MidiClock {
     const now = performance.now();
     const dt = Math.max(0, (now - this._lastSched) / 1000);
     this._lastSched = now;
-    if (this.targetBpm == null) {
-      if (this.running) { this._send(MSG_STOP); this.running = false; }
-      return;
-    }
+    const haveTempo = this.targetBpm != null;
+
     if (!this.running) {
+      if (!haveTempo) return;                 // auf erste Tempo-Schaetzung warten
       this.running = true;
       this.curBpm = this.targetBpm;
-      this.nextTick = now + 20;
-      this._send(MSG_START);
-    } else {
+      this.tickInBeat = 0;
+      // ersten Tick (Beat) auf den naechsten Song-Beat legen, falls bekannt
+      if (this._beatActive(now)) {
+        const m = Math.ceil((now + 20 - this.anchor) / this.period);
+        this.nextTick = this.anchor + m * this.period;
+      } else {
+        this.nextTick = now + 20;
+      }
+      if (this.sendStartStop) this._send(MSG_START);
+    } else if (haveTempo) {
       const diff = this.targetBpm - this.curBpm;
       if (Math.abs(diff) > DEADBAND_BPM) {
         const maxStep = SLEW_BPM_PER_S * dt;
         this.curBpm += Math.max(-maxStep, Math.min(maxStep, diff));
       }
+    } else if (this.sendStartStop) {
+      this._send(MSG_STOP); this.running = false; return;
     }
+    // ohne Start/Stop bei Stille: einfach mit letztem Tempo weiterticken.
+
     if (this.nextTick < now - LOOKAHEAD_MS) this.nextTick = now;
+    const interval = 60000 / (this.curBpm * PPQN);
     const horizon = now + LOOKAHEAD_MS;
     while (this.nextTick < horizon) {
+      // Phasenkopplung: den Beat-Tick (Tick 0) sanft aufs Song-Raster ziehen.
+      if (this.tickInBeat === 0 && this._beatActive(now)) {
+        const m = Math.round((this.nextTick - this.anchor) / this.period);
+        const err = (this.anchor + m * this.period) - this.nextTick;
+        if (Math.abs(err) < this.period * 0.45) {     // Halbbeat-Slips ignorieren
+          this.nextTick += Math.max(-BEAT_MAX_NUDGE_MS,
+                                    Math.min(BEAT_MAX_NUDGE_MS, err * BEAT_PLL_GAIN));
+        }
+      }
       this._send(MSG_CLOCK, this.nextTick);
-      this.nextTick += 60000 / (this.curBpm * PPQN);
+      this.nextTick += interval;
+      this.tickInBeat = (this.tickInBeat + 1) % PPQN;
     }
   }
 }
@@ -557,6 +646,36 @@ function midiName(m) {
 function velFromLevel(level) {
   const db = level > 0 ? 20 * Math.log10(level) : -90;
   return Math.max(1, Math.min(127, Math.round((db + 54) / 48 * 127)));
+}
+// Akkord aus den klingenden Tonklassen ableiten (Name oder '').
+const CHORD_TYPES = [
+  ['',     [0, 4, 7]],        // Dur
+  ['m',    [0, 3, 7]],        // Moll
+  ['dim',  [0, 3, 6]],
+  ['aug',  [0, 4, 8]],
+  ['7',    [0, 4, 7, 10]],
+  ['maj7', [0, 4, 7, 11]],
+  ['m7',   [0, 3, 7, 10]],
+  ['sus4', [0, 5, 7]],
+  ['sus2', [0, 2, 7]],
+];
+function chordName(pcList) {
+  const present = new Set(pcList);
+  if (present.size < 3) return '';
+  let best = '', bestScore = 0.5;
+  for (let root = 0; root < 12; root++) {
+    if (!present.has(root)) continue;          // Grundton muss klingen
+    for (const [suffix, ivs] of CHORD_TYPES) {
+      let matched = 0;
+      for (const iv of ivs) if (present.has((root + iv) % 12)) matched++;
+      const missing = ivs.length - matched, extra = present.size - matched;
+      const score = matched - 0.9 * missing - 0.5 * extra;
+      if (matched >= 3 && score > bestScore) {
+        bestScore = score; best = NOTE_NAMES[root] + suffix;
+      }
+    }
+  }
+  return best;
 }
 // YIN-Tonhoehe (monophon): kumulative mittlere Differenz + Schwelle +
 // Parabel-Interpolation. Rueckgabe Frequenz in Hz oder 0 (kein Ton).
@@ -641,37 +760,51 @@ class NoteEngine {
     }
   }
   _poly(level) {
+    // Harmonische-Summen-Salienz mit iterativer Oberton-Ausloeschung:
+    // Fuer jede Kandidaten-Note wird die Magnitude ihrer Obertonreihe summiert
+    // (Grundton am staerksten gewichtet). Die staerkste Note wird akzeptiert,
+    // ihre Obertonreihe aus dem Spektrum geloescht und neu gesucht -- so wird
+    // ein Oberton nicht faelschlich als eigene Note erkannt.
     const detected = new Set();
     if (level > NOTE_SILENCE_RMS) {
       const N = this.win, re = this.re, im = this.im, han = this.han;
       for (let i = 0; i < N; i++) { re[i] = this.buf[i] * han[i]; im[i] = 0; }
       this.fft.transform(re, im);
-      const half = N >> 1, mag = new Float32Array(half);
+      const half = N >> 1, spec = new Float32Array(half);
       let maxMag = 0;
-      for (let k = 1; k < half; k++) { const m = Math.hypot(re[k], im[k]); mag[k] = m; if (m > maxMag) maxMag = m; }
+      for (let k = 1; k < half; k++) { const m = Math.hypot(re[k], im[k]); spec[k] = m; if (m > maxMag) maxMag = m; }
       if (maxMag > 0) {
-        const thr = maxMag * 0.12, cands = [];
-        for (let k = 2; k < half - 1; k++) {
-          if (mag[k] > thr && mag[k] > mag[k - 1] && mag[k] >= mag[k + 1]) {
-            const a = mag[k - 1], b = mag[k], c = mag[k + 1], denom = a - 2 * b + c;
-            const delta = denom !== 0 ? 0.5 * (a - c) / denom : 0;
-            cands.push({ freq: (k + delta) * this.sr / N, mag: b });
+        const nyq = this.sr / 2, scale = N / this.sr;
+        const harmAt = (f) => {                  // Peak-Magnitude nahe f (+/-2 Bins)
+          const b = Math.round(f * scale);
+          const lo = Math.max(1, b - 2), hi = Math.min(half - 1, b + 2);
+          let mx = 0; for (let k = lo; k <= hi; k++) if (spec[k] > mx) mx = spec[k];
+          return mx;
+        };
+        let firstSal = 0;
+        for (let iter = 0; iter < NOTE_MAX_POLY; iter++) {
+          let bestM = -1, bestS = 0;
+          for (let m = NOTE_MIN_MIDI; m <= NOTE_MAX_MIDI; m++) {
+            if (detected.has(m)) continue;
+            const f0 = 440 * Math.pow(2, (m - 69) / 12);
+            if (f0 < 50 || f0 >= nyq) continue;
+            let s = 0;
+            for (let h = 1; h <= POLY_HARMONICS; h++) {
+              const f = f0 * h; if (f >= nyq) break;
+              s += harmAt(f) / h;                // Grundton am staerksten gewichtet
+            }
+            if (s > bestS) { bestS = s; bestM = m; }
           }
-        }
-        cands.sort((x, y) => y.mag - x.mag);
-        const accepted = [];
-        for (const cand of cands) {
-          if (accepted.length >= 6) break;
-          const m = Math.round(69 + 12 * Math.log2(cand.freq / 440));
-          if (m < NOTE_MIN_MIDI || m > NOTE_MAX_MIDI || detected.has(m)) continue;
-          let harmonic = false;                         // Oberton eines staerkeren Grundtons?
-          for (const acc of accepted) {
-            const r = cand.freq / acc.freq;
-            if (r > 1.5 && Math.abs(r - Math.round(r)) < 0.04) { harmonic = true; break; }
+          if (bestM < 0) break;
+          if (iter === 0) firstSal = bestS;
+          else if (bestS < firstSal * POLY_REL_THRESH) break;
+          detected.add(bestM);
+          const f0 = 440 * Math.pow(2, (bestM - 69) / 12);   // Obertonreihe loeschen
+          for (let h = 1; h <= POLY_HARMONICS; h++) {
+            const f = f0 * h; if (f >= nyq) break;
+            const b = Math.round(f * scale);
+            for (let k = Math.max(0, b - 2); k <= Math.min(half - 1, b + 2); k++) spec[k] = 0;
           }
-          if (harmonic) continue;
-          accepted.push({ freq: cand.freq, midi: m });
-          detected.add(m);
         }
       }
     }
@@ -686,7 +819,10 @@ class NoteEngine {
       else this.active.set(m, miss + 1);
     }
     const on = [...this.active.keys()].filter(m => this.active.get(m) === 0).sort((a, b) => a - b);
-    this.display = on.length ? on.map(midiName).join(' ') : '—';
+    const ch = chordName(on.map(m => ((m % 12) + 12) % 12));
+    this.display = on.length
+      ? on.map(midiName).join(' ') + (ch ? '  (' + ch + ')' : '')
+      : '—';
   }
   allOff() {
     if (this.curNote !== -1) { this.send([0x80 | NOTE_CH, this.curNote, 0]); this.curNote = -1; }
@@ -740,6 +876,7 @@ const elBpm = $('bpm'), elRaw = $('raw'), elStatus = $('status');
 const elBar = $('levelBar'), elDb = $('db'), elHint = $('hint');
 const elKeyToggle = $('keyToggle'), elKeyBlock = $('keyBlock');
 const elKeyName = $('keyName'), elKeyPar = $('keyPar');
+const elStartStop = $('startStop');
 
 // --- Web MIDI (erst bei Bedarf anfragen) ---
 async function initMidi() {
@@ -849,6 +986,7 @@ function applySource() {
 function applyModeControls() {
   const note = opMode !== 'clock';
   elMin.disabled = note; elMax.disabled = note; elKeyToggle.disabled = note;
+  elStartStop.disabled = note;        // Start/Stop nur im Clock-Modus relevant
 }
 function applyMode() {
   opMode = elMode.value;
@@ -981,6 +1119,7 @@ async function start() {
   estimates = []; lastRaw = 0; levelEma = 0; haveEstimate = false;
   resetKey();
   if (!noteMode) {
+    clock.sendStartStop = elStartStop.checked;
     clock.enable();
     analyzeTimer = setInterval(analyze, ANALYSIS_INTERVAL * 1000);
   }
@@ -1041,7 +1180,13 @@ function analyze() {
     estimates.push(est.bpm);
     if (estimates.length > BPM_MEDIAN_LEN) estimates.splice(0, estimates.length - BPM_MEDIAN_LEN);
     haveEstimate = true;
-    clock.setTargetBpm(median(estimates));
+    const med = median(estimates);
+    clock.setTargetBpm(med);
+    // Beat-Phase melden -> die Clock rastet aufs Song-Raster ein (gegen Drift).
+    const offSec = analyzer.beatPhase(med);
+    if (offSec != null) {
+      clock.setBeat(lastChunkTime - offSec * 1000, 60000 / med);
+    }
   }
   updateKey();
 }
@@ -1153,6 +1298,7 @@ elInput.addEventListener('focus', () => { if (!inputsUnlocked) unlockInputs(); }
 elMidi.addEventListener('focus', initMidi);
 elSource.addEventListener('change', applySource);
 elMode.addEventListener('change', applyMode);
+elStartStop.addEventListener('change', () => { clock.sendStartStop = elStartStop.checked; });
 elKeyToggle.addEventListener('click', () => {
   keyEnabled = !keyEnabled;
   elKeyBlock.style.display = keyEnabled ? '' : 'none';

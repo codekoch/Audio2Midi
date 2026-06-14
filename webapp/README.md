@@ -43,9 +43,13 @@ Schritte bewusst **nicht** mit – für möglichst geringe Latenz.
 - **Monophon:** erkennt jeweils EINE Note (Gesang, Bass, Lead, einzelnes
   Instrument, Pfeifen) per YIN-Tonhöhenerkennung. Geringe Latenz, gute
   Treffsicherheit – braucht aber eine klar einstimmige Quelle.
-- **Polyphon:** erkennt mehrere Noten gleichzeitig per FFT-Peak-Analyse mit
-  Oberton-Unterdrückung. Etwas höhere Latenz (größeres Analysefenster) und
-  begrenzte Genauigkeit; bei dichter/komplexer Musik nur ein grober Eindruck.
+- **Polyphon:** erkennt mehrere Noten gleichzeitig per harmonischer
+  Salienz-Analyse mit **iterativer Oberton-Auslöschung** – die stärkste Note
+  wird erkannt, ihre Obertonreihe aus dem Spektrum entfernt und neu gesucht,
+  damit Obertöne (z. B. bei Gitarre) nicht als eigene Noten auftauchen. Etwas
+  höhere Latenz und begrenzte Genauigkeit; bei dichter Musik ein grober
+  Eindruck. Ergibt sich aus den Tönen ein Akkord, wird er **in Klammern**
+  angezeigt (z. B. „C4 E4 G4 (C)").
 
 Velocity wird aus dem Pegel abgeleitet, gesendet wird auf MIDI-Kanal 1.
 Beim Stoppen/Umschalten werden alle offenen Noten beendet (Note Off).
@@ -93,6 +97,18 @@ sondern an der OS-MIDI-Schicht – derselbe Gedanke wie bei CoreMIDI auf dem
 Mac. Ein Lookahead-Scheduler füllt die Tick-Warteschlange laufend ein Stück
 in die Zukunft. Tempoänderungen werden mit Totband (gegen Mess-Zittern) und
 begrenzter Slew-Rate sanft nachgeführt – kein Tick-Burst.
+
+**Phasenkopplung gegen Drift:** Zusätzlich zur reinen Tempofolge rastet die
+Clock per PLL sanft auf das **Beat-Raster des Songs** ein – die Beat-Phase
+wird aus der Onset-Hüllkurve geschätzt, und der Beat-Tick (Tick 1 von 24)
+wird mit max. wenigen Millisekunden pro Beat darauf nachgezogen. So bleibt
+ein synchronisiertes Gerät dauerhaft im Timing, statt langsam wegzudriften.
+
+**MIDI Start/Stop (Option):** Standardmäßig sendet die App **kein** Start/Stop,
+sondern nur durchgehende Clock-Pulse – du startest dein Gerät selbst (auf den
+gewünschten Taktanfang), die Clock hält dann das Timing. Wer das klassische
+Verhalten will (Start mit der ersten Tempo-Schätzung, Stop bei Stille), hakt
+„MIDI Start/Stop · senden" an.
 
 **Tipp:** Den Tab im Vordergrund lassen. Hintergrund-Tabs werden vom Browser
 gedrosselt; durch den Lookahead bleibt die Clock zwar eine Weile stabil,
