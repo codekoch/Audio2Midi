@@ -9,6 +9,9 @@
   Tonart-Anzeige -- eine eigenstaendige HTML-Datei. Laeuft direkt im Browser
   (Doppelklick / Strg+O) oder ueber GitHub Pages; kein Server noetig.
 
+  Quelle wahlweise Mikrofon/Line-In (getUserMedia) ODER die Wiedergabe
+  mithoeren (getDisplayMedia: Tab-/System-Audio -- "Loopback").
+
   Umsetzung:
     * ScriptProcessorNode statt AudioWorklet. Der Worklet laedt ein Modul,
       was der Browser unter file:// (Origin "null") blockiert. Der
@@ -105,6 +108,13 @@ main {
   </header>
 
   <section class="controls">
+    <div class="field">
+      <label for="srcMode">Quelle</label>
+      <select id="srcMode">
+        <option value="input">Audio-Eingang (Mikrofon/Line-In)</option>
+        <option value="display">Wiedergabe mithören (Tab/System)</option>
+      </select>
+    </div>
     <div class="field">
       <label for="audioIn">Audio-Eingang</label>
       <div class="row">
@@ -528,6 +538,7 @@ let emaPcp = null, emaBass = null, cumPcp = null, cumBass = null, cumN = 0;
 const KEY_EMA_A = ANALYSIS_INTERVAL / KEY_EMA_SEC;
 
 const $ = (id) => document.getElementById(id);
+const elSource = $('srcMode');
 const elMidi = $('midiOut'), elInput = $('audioIn'), elLoad = $('loadInputs');
 const elMin = $('minBpm'), elMax = $('maxBpm'), elStart = $('startBtn');
 const elBpm = $('bpm'), elRaw = $('raw'), elStatus = $('status');
@@ -623,25 +634,74 @@ async function unlockInputs() {
   }
 }
 
+// Quellenwahl: Eingang/Mikrofon vs. Wiedergabe mithören. Die Steuerelemente
+// fuer die Mikrofon-Geraetewahl sind im Mithoer-Modus nicht relevant.
+function applySource() {
+  const display = elSource.value === 'display';
+  elInput.disabled = display;
+  elLoad.disabled = display;
+  if (display) {
+    setHint('Wiedergabe mithören: Beim Start „Ganzer Bildschirm" + „Systemaudio teilen" '
+          + '(Windows/Chrome) bzw. einen Tab + „Tab-Audio teilen" wählen. '
+          + 'macOS/Safari: nur Tab-Audio, kein System-Audio.');
+  } else {
+    setHint('„Eingänge laden“ klicken, um alle Audio-Eingänge mit Namen zu sehen.');
+  }
+}
+
+// Liefert den MediaStream je nach Quelle. 'display' nutzt die Screen-Capture-
+// API (getDisplayMedia): erfasst Tab-/System-Audio. Chrome verlangt dabei
+// einen Video-Track -> wir fordern ihn an, schalten ihn aber ab (enabled=false)
+// und werten nur das Audio aus.
+async function acquireStream(mode) {
+  const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  if (mode === 'display') {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      throw new Error('Dieser Browser kann keine Wiedergabe mithören (getDisplayMedia fehlt).');
+    }
+    const s = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 1 }, audio, systemAudio: 'include'
+    });
+    if (s.getAudioTracks().length === 0) {
+      s.getTracks().forEach(t => t.stop());
+      throw new Error('Kein Audio geteilt. Beim Teilen unbedingt „Systemaudio teilen" '
+                    + '(ganzer Bildschirm) bzw. „Tab-Audio teilen" ankreuzen.');
+    }
+    s.getVideoTracks().forEach(t => { t.enabled = false; });   // Video nicht gebraucht
+    return s;
+  }
+  const constraints = { audio };
+  if (elInput.value) constraints.audio.deviceId = { exact: elInput.value };
+  return navigator.mediaDevices.getUserMedia(constraints);
+}
+
 // --- Sitzung starten / stoppen ---
 async function start() {
   const minBpm = clampBpm(parseFloat(elMin.value), DEFAULT_MIN_BPM);
   const maxBpm = clampBpm(parseFloat(elMax.value), DEFAULT_MAX_BPM);
   if (!(minBpm < maxBpm)) { setHint('BPM-Bereich ungueltig: von < bis (z. B. 70 bis 140).', true); return; }
 
+  const mode = elSource.value;          // 'input' | 'display'
   try {
-    const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
-    if (elInput.value) constraints.audio.deviceId = { exact: elInput.value };
-    mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    mediaStream = await acquireStream(mode);
   } catch (e) {
-    setHint('Mikrofon-/Eingangszugriff fehlgeschlagen: ' + e.message + '  — anderen Eingang waehlen oder Zugriff erlauben.', true);
+    setHint((mode === 'display' ? 'Mithören fehlgeschlagen: ' : 'Mikrofon-/Eingangszugriff fehlgeschlagen: ')
+          + e.message, true);
     setStatus('FEHLER');
     return;
   }
 
-  captureGranted(mediaStream);
-  inputsUnlocked = true;
-  refreshAudioInputs();
+  if (mode === 'input') {
+    captureGranted(mediaStream);
+    inputsUnlocked = true;
+    refreshAudioInputs();
+  }
+  // Beendet der Nutzer das Teilen/die Freigabe im Browser, endet der Audio-
+  // Track -> Sitzung sauber stoppen.
+  const at0 = mediaStream.getAudioTracks()[0];
+  if (at0) at0.addEventListener('ended', () => {
+    if (running) { stop(); setHint('Mithören/Aufnahme beendet (Quelle gestoppt).'); }
+  });
 
   try {
     audioCtx = new AudioContext();
@@ -707,6 +767,7 @@ function stop() {
   elStart.textContent = 'Start';
   elStart.classList.remove('stop');
   setControlsDisabled(false);
+  applySource();                      // Eingangsfelder je nach Quelle wieder richtig
   setBpmText('—');
   elRaw.textContent = 'roh: —';
   setStatus('bereit');
@@ -828,7 +889,10 @@ function updateLevel(db) {
   elBar.style.width = pct + '%';
   elDb.textContent = (db <= -60 ? '-60' : db.toFixed(0)) + ' dB';
 }
-function setControlsDisabled(on) { elInput.disabled = on; elLoad.disabled = on; elMin.disabled = on; elMax.disabled = on; }
+function setControlsDisabled(on) {
+  elSource.disabled = on; elInput.disabled = on; elLoad.disabled = on;
+  elMin.disabled = on; elMax.disabled = on;
+}
 
 // --- Verdrahtung ---
 elStart.addEventListener('click', () => running ? stop() : start());
@@ -836,6 +900,7 @@ elMidi.addEventListener('change', applyMidiOutput);
 elLoad.addEventListener('click', () => { inputsUnlocked = false; unlockInputs(); });
 elInput.addEventListener('focus', () => { if (!inputsUnlocked) unlockInputs(); });
 elMidi.addEventListener('focus', initMidi);
+elSource.addEventListener('change', applySource);
 elKeyToggle.addEventListener('click', () => {
   keyEnabled = !keyEnabled;
   elKeyBlock.style.display = keyEnabled ? '' : 'none';

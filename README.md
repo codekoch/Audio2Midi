@@ -102,7 +102,9 @@ hartes Ausschalten) und Performance-Tipps stehen in
 Eine schlanke Browser-Variante ohne Installation liegt als **einzelne Datei**
 in [webapp/index.html](webapp/index.html): BPM-Erkennung mit stabiler
 MIDI-Clock und optionaler Tonart-Anzeige über die Web Audio und Web MIDI API
-(Chrome/Edge). Einfach im Browser öffnen – kein Server nötig.
+(Chrome/Edge). Als Quelle dient ein Audio-Eingang oder die mitgehörte
+Wiedergabe (Tab-/System-Audio über die Screen-Capture-API). Einfach im
+Browser öffnen – kein Server nötig.
 
 👉 **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
 

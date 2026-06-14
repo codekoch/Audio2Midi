@@ -2,8 +2,10 @@
 
 Eine schlanke Browser-Variante des Projekts: Tempo-Erkennung (BPM) mit
 **stabiler MIDI-Clock-Ausgabe** (24 PPQN), optional auch die **Grundtonart**
-(mit Paralleltonart). Keine Installation, kein Python, kein Server -- die
-ganze App steckt in einer einzigen Datei: **`index.html`**.
+(mit Paralleltonart). Als Quelle dient ein Audio-Eingang **oder** die
+**mitgehörte Wiedergabe** (Tab-/System-Audio). Keine Installation, kein
+Python, kein Server -- die ganze App steckt in einer einzigen Datei:
+**`index.html`**.
 
 > **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
 
@@ -15,9 +17,11 @@ ganze App steckt in einer einzigen Datei: **`index.html`**.
 
 Dann:
 
-1. **„Eingänge laden"** klicken und den Mikrofon-Zugriff erlauben – erst
-   danach zeigt der Browser alle Audio-Eingänge **mit Namen** (Datenschutz).
-   Den gewünschten **Audio-Eingang** wählen.
+1. **Quelle** wählen: „Audio-Eingang" (Mikrofon/Line-In) oder „Wiedergabe
+   mithören" (siehe Abschnitt unten). Bei „Audio-Eingang" zusätzlich
+   **„Eingänge laden"** klicken und den Mikrofon-Zugriff erlauben – erst
+   danach zeigt der Browser alle Eingänge **mit Namen** (Datenschutz) – und
+   den gewünschten Eingang wählen.
 2. **MIDI-Ausgang**: die Liste öffnen (fragt den MIDI-Zugriff an) und einen
    Port wählen, z. B. „loopMIDI Port". „Kein MIDI" zeigt nur an.
 3. Optional **BPM-Bereich** anpassen (Standard 70–140) und über den Button
@@ -27,6 +31,24 @@ Dann:
 Die große Zahl zeigt das erkannte Tempo; die MIDI-Clock startet automatisch
 mit der ersten stabilen Schätzung (MIDI `start`) und hält bei Stille an
 (`stop`).
+
+## Wiedergabe mithören (Loopback)
+
+Statt eines Mikrofons lässt sich auch die laufende **Wiedergabe** analysieren
+(z. B. was gerade in Spotify spielt). Quelle auf **„Wiedergabe mithören"**
+stellen und **Start** drücken – dann erscheint der Freigabe-Dialog des
+Browsers (Screen-Capture API, `getDisplayMedia`):
+
+- **Windows, Chrome/Edge:** „**Gesamter Bildschirm**" wählen und unten
+  **„Systemaudio teilen"** ankreuzen → die komplette Systemausgabe wird
+  mitgehört (auch Desktop-Apps wie Spotify). Alternativ einen **Tab** wählen
+  und **„Tab-Audio teilen"** ankreuzen (z. B. den Spotify-Web-Player).
+- **macOS:** System-Audio ist hier nicht erfassbar – nur **Tab-Audio**
+  (Spotify/YouTube als Browser-Tab). Safari unterstützt es nicht.
+
+Wichtig: Das Audio-Häkchen muss aktiv sein, sonst kommt kein Ton an (die App
+weist dann darauf hin). Beendet man die Freigabe über die Browser-Leiste,
+stoppt die Sitzung automatisch. Die Wiedergabe ist weiterhin normal hörbar.
 
 ## Voraussetzungen
 
@@ -79,11 +101,10 @@ hochaufgelösten) STFT statt der CQT des Python-Projekts.
   einen Eintrag pro echtem Gerät. Die Python-App (PortAudio) listet dasselbe
   Interface mehrfach (MME, DirectSound, WASAPI, WDM-KS). Namen erscheinen erst
   nach der Mikrofon-Freigabe („Eingänge laden").
-- **Kein Mithören der Wiedergabe** (Spotify o. ä.): Browser dürfen die Ausgabe
-  anderer Apps nicht systemweit mitschneiden; die WASAPI-„Loopback"-Einträge
-  der Windows-Version gibt es nicht. Quelle ist immer Mikrofon oder ein
-  Audio-Interface. Ein in Windows aktiviertes „Stereomix" erscheint allerdings
-  als normaler Eingang.
+- **Mithören der Wiedergabe** ist möglich, aber über die Screen-Capture-API
+  (siehe oben) statt eines WASAPI-Loopback-Geräts: Es muss pro Sitzung im
+  Browser-Dialog freigegeben werden, und vollständiges **System-Audio gibt es
+  nur unter Windows** (Chrome/Edge). Unter macOS nur Tab-Audio.
 - **Vereinfachte Analyse:** Spektralfluss-Onset-Hüllkurve statt HPSS; Tonart
   aus STFT-Chroma statt CQT (etwas weniger treffsicher, vor allem bei der
   Dur/Moll-Unterscheidung). Keine Akkorde, kein Beat-Sync.
