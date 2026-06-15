@@ -113,8 +113,9 @@ MIDI-Clock und optionaler Tonart-Anzeige über die Web Audio und Web MIDI API
 Wiedergabe (Tab-/System-Audio über die Screen-Capture-API). Zusätzlich gibt es
 einen **Datei-Modus**, der eine geladene Audiodatei vorab zu einer Beat-Map
 analysiert und ihre MIDI-Clock **driftfrei** zur Wiedergabe ausgibt, sowie
-einen **Noten-Modus** (Pitch → MIDI, mono-/polyphon). Einfach im Browser
-öffnen – kein Server nötig.
+einen **Noten-Modus** (Pitch → MIDI, mono-/polyphon) und einen
+**Akkord-Modus**, der angeschlagene Akkorde (z. B. Gitarre) erkennt und als
+sauberen MIDI-Akkord sendet. Einfach im Browser öffnen – kein Server nötig.
 
 👉 **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
 

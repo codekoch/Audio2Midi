@@ -88,8 +88,20 @@ Schritte bewusst **nicht** mit – für möglichst geringe Latenz.
   wird erkannt, ihre Obertonreihe aus dem Spektrum entfernt und neu gesucht,
   damit Obertöne (z. B. bei Gitarre) nicht als eigene Noten auftauchen. Etwas
   höhere Latenz und begrenzte Genauigkeit; bei dichter Musik ein grober
-  Eindruck. Ergibt sich aus den Tönen ein Akkord, wird er **in Klammern**
-  angezeigt (z. B. „C4 E4 G4 (C)").
+  Eindruck. Es werden alle erkannten Töne einzeln gesendet – auch
+  Fehlerkennungen. Wer **saubere Akkorde** triggern will, nimmt den
+  Akkord-Modus.
+- **Akkorde:** erkennt aus dem Klang den **wahrscheinlichsten Akkord** und
+  sendet ihn als sauberes MIDI-Voicing – ideal, um z. B. mit einer Gitarre
+  MIDI-Akkorde zu triggern. Aus dem Spektrum wird ein Chroma (12 Tonklassen)
+  gebildet und per **Template-Matching** (Cosinus-Ähnlichkeit gegen Dur-,
+  Moll-, 7-, maj7-, m7-, sus- und dim/aug-Vorlagen, Grundton-Gewichtung)
+  klassifiziert; ein Mehrheits-/Abstandskriterium verwirft Unklares. **Töne,
+  die nicht zum Akkord gehören (meist Fehlerkennungen), fallen weg** – gesendet
+  werden nur die Akkordtöne, als Grundstellung in der gespielten Lage. Der
+  Akkord wird **gehalten**, bis sicher ein anderer erkannt wird oder es still
+  wird (kein Geflacker). Angezeigt wird der Akkordname plus die gesendeten
+  Noten (z. B. „E  E2 G#2 B2").
 
 Velocity wird aus dem Pegel abgeleitet, gesendet wird auf MIDI-Kanal 1.
 Beim Stoppen/Umschalten werden alle offenen Noten beendet (Note Off).
@@ -99,6 +111,34 @@ entprelltes Note-Off), statt bei jedem kurzen Erkennungsaussetzer neu
 getriggert zu werden. Mit **„Oktave ±"** lassen sich die erkannten Töne für
 die MIDI-Ausgabe um ganze Oktaven nach oben/unten verschieben (z. B. eine
 tief gespielte Bassline eine Oktave höher an einen Synth schicken).
+
+### Kalibrierung (Tracking feinjustieren)
+
+In den Noten-/Akkord-Modi blendet **„Kalibrierung"** ein Panel mit Schiebe-
+reglern ein, die **sofort** (auch während des Spielens) wirken – ideal, um das
+Tracking auf das eigene Instrument einzustellen, z. B. eine Gitarre an einen
+mono­phonen Synth:
+
+- **Latenz (Audioblock):** Größe des Audioblocks (256 / 512 / 1024 / 2048
+  Samples ≈ 6 / 12 / 23 / 46 ms). Kleiner = schnellere Reaktion zwischen Spiel
+  und gesendeter MIDI-Note, aber mehr CPU; sehr kleine Werte können das
+  Tracking unruhiger machen. Das Tonhöhen-Fenster bleibt davon unberührt, die
+  **Erkennungsqualität sinkt also nicht** – nur die Eingangs-Latenz. Standard
+  512 (mono/poly) bzw. 1024 (Akkorde, etwas stabiler).
+- **Anschlag-Schwelle:** ab welchem Pegel eine neue Note/ein Akkord startet
+  (gegen Nebengeräusche/Übersprechen hochsetzen, für leises Spiel runter).
+- **Halte-Schwelle:** wie weit ein ausklingender Ton fallen darf, bevor er
+  losgelassen wird (mono/Akkord).
+- **Note-Aus-Verzögerung:** wie viele leise Frames bis zum Note-Off – klein =
+  knackiger/kürzer, groß = klebt länger (gut gegen Zappeln beim Ausklingen).
+- **YIN-Schwelle (nur mono):** Strenge der Tonhöhenerkennung – kleiner =
+  strenger (weniger Oktavfehler, aber verpasst evtl. leise Töne).
+- **Wechsel-Reaktion:** wie schnell auf einen neuen Ton/Akkord umgeschaltet
+  wird – 1 = sofort (geringste Latenz, aber empfindlicher), höher = stabiler.
+
+Die Regler-Werte zeigen neben dem Frame-Wert die ungefähre Zeit in
+Millisekunden (abhängig von der gewählten Latenz). **„Zurücksetzen"** stellt
+die für den Modus sinnvollen Standardwerte wieder her.
 
 ## Wiedergabe mithören (Loopback)
 

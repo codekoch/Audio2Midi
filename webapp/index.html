@@ -5,8 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Audio2Midi -- BPM, MIDI-Clock & Tonart (Webversion)</title>
 <!--
-  Audio2Midi Webversion: BPM-Erkennung mit stabiler MIDI-Clock und optionaler
-  Tonart-Anzeige -- eine eigenstaendige HTML-Datei. Laeuft direkt im Browser
+  Audio2Midi Webversion: BPM-Erkennung mit MIDI-Clock, Tonerkennung mit Midi-Ausgabe und Tonart-Anzeige -- eine eigenstaendige HTML-Datei. Laeuft direkt im Browser
   (Doppelklick / Strg+O) oder ueber GitHub Pages; kein Server noetig.
 
   Quelle wahlweise Mikrofon/Line-In (getUserMedia) ODER die Wiedergabe
@@ -104,6 +103,16 @@ main {
 .hint.error { color: var(--warn); }
 .credit { padding: 4px 24px 10px; font-size: 11px; color: #55544e; text-align: right; }
 
+/* Kalibrier-Panel (Tracking-Feinjustage) */
+.calib { display: flex; flex-wrap: wrap; gap: 10px 26px; padding: 12px 24px; border-bottom: 1px solid var(--surface); background: #1a1916; }
+.calibrow { display: flex; flex-direction: column; gap: 3px; min-width: 210px; }
+.calibrow > label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.calibrow .r { display: flex; align-items: center; gap: 10px; }
+.calibrow input[type="range"] { flex: 1; accent-color: var(--accent); min-width: 120px; }
+.calibrow .cval { font-size: 12px; color: var(--fg); font-variant-numeric: tabular-nums; min-width: 84px; text-align: right; }
+.calib .note { flex-basis: 100%; font-size: 12px; color: var(--muted); margin: 0; }
+.calib .actions { display: flex; align-items: flex-end; }
+
 /* Kompaktere Darstellung auf schmalen Bildschirmen (Handy) */
 @media (max-width: 600px) {
   header { flex-direction: column; align-items: flex-start; gap: 1px; padding: 8px 14px; }
@@ -133,7 +142,7 @@ main {
 <body>
   <header>
     <h1>Audio2Midi</h1>
-    <span class="sub">BPM-Erkennung mit stabiler MIDI-Clock und Tonarterkennung &middot; Webversion</span>
+    <span class="sub">BPM-Erkennung mit MIDI-Clock, Tonerkennung mit Midi-Ausgabe und Tonarterkennung &middot; Webversion</span>
   </header>
 
   <section class="controls">
@@ -144,6 +153,7 @@ main {
         <option value="file">Datei → MIDI-Clock (driftfrei)</option>
         <option value="mono">Noten → MIDI (monophon)</option>
         <option value="poly">Noten → MIDI (polyphon)</option>
+        <option value="chord">Noten → MIDI (Akkorde)</option>
       </select>
     </div>
     <div class="field" id="srcField">
@@ -199,7 +209,43 @@ main {
       <input type="number" id="octave" value="0" min="-4" max="4" step="1"
              title="Erkannte Noten für die MIDI-Ausgabe um N Oktaven verschieben">
     </div>
+    <div class="field" id="calibField" style="display:none">
+      <label>Kalibrierung</label>
+      <button id="calibToggle" class="ghost"
+              title="Tracking feinjustieren (Schwellen, Latenz, Reaktion)">anzeigen</button>
+    </div>
     <button id="startBtn">Start</button>
+  </section>
+
+  <section class="calib" id="calibPanel" style="display:none">
+    <div class="calibrow" data-modes="mono poly chord">
+      <label for="cLatency">Latenz (Audioblock)</label>
+      <div class="r"><input type="range" id="cLatency" min="0" max="3" step="1" value="1"><span class="cval" id="cLatencyV">512</span></div>
+    </div>
+    <div class="calibrow" data-modes="mono poly chord">
+      <label for="cSilence">Anschlag-Schwelle</label>
+      <div class="r"><input type="range" id="cSilence" min="-66" max="-30" step="1" value="-48"><span class="cval" id="cSilenceV">-48 dB</span></div>
+    </div>
+    <div class="calibrow" data-modes="mono chord">
+      <label for="cSustain">Halte-Schwelle</label>
+      <div class="r"><input type="range" id="cSustain" min="-78" max="-40" step="1" value="-56"><span class="cval" id="cSustainV">-56 dB</span></div>
+    </div>
+    <div class="calibrow" data-modes="mono chord">
+      <label for="cOff">Note-Aus-Verzögerung</label>
+      <div class="r"><input type="range" id="cOff" min="1" max="12" step="1" value="3"><span class="cval" id="cOffV">3</span></div>
+    </div>
+    <div class="calibrow" data-modes="mono">
+      <label for="cYin">YIN-Schwelle (Tonhöhe)</label>
+      <div class="r"><input type="range" id="cYin" min="0.05" max="0.30" step="0.01" value="0.15"><span class="cval" id="cYinV">0.15</span></div>
+    </div>
+    <div class="calibrow" data-modes="mono chord">
+      <label for="cChange">Wechsel-Reaktion</label>
+      <div class="r"><input type="range" id="cChange" min="1" max="6" step="1" value="2"><span class="cval" id="cChangeV">2</span></div>
+    </div>
+    <div class="field actions">
+      <button id="calibReset" class="ghost">Zurücksetzen</button>
+    </div>
+    <p class="note" id="calibNote"></p>
   </section>
 
   <main>
@@ -285,6 +331,16 @@ const POLY_HARMONICS   = 8;       // so viele Obertoene gehen in die Salienz ein
 const POLY_REL_THRESH  = 0.34;    // weitere Note nur, wenn Salienz >= Anteil der staerksten
 const POLY_CANCEL_BINS = 3;       // +/- Bins, die je Oberton geloescht werden
 const NOTE_MAX_POLY    = 5;       // max. gleichzeitige Noten
+
+// Akkord-Modus (erkannter Akkord -> sauberer MIDI-Akkord, Fehltoene weggefiltert)
+const CHORD_MIN_SCORE  = 0.74;    // Mindest-Aehnlichkeit (Cosinus) Chroma<->Akkord-Template
+const CHORD_MIN_MARGIN = 0.02;    // Mindestabstand zum besten Akkord mit anderem Grundton (sonst kein klarer Akkord)
+const CHORD_ROOT_W     = 1.4;     // Grundton im Template staerker gewichten (Bass-Evidenz)
+const CHORD_CONFIRM    = 3;       // Frames zur Bestaetigung eines NEUEN Akkords (reitet die Fenster-Mischphase beim Wechsel aus)
+const CHORD_OFF_FRAMES = 6;       // leise Frames bis Akkord-Off (Akkorde klingen laenger aus)
+const CHORD_EMA        = 0.5;     // Glaettung des Chroma ueber Frames (Stabilitaet bei gehaltenem Akkord)
+const CHORD_FMIN       = 70;      // Chroma nur aus diesem Frequenzbereich -> Grundtoene, weniger Oberton-Mulm
+const CHORD_FMAX       = 1100;
 
 // ===========================================================================
 // Radix-2-FFT (in-place)
@@ -701,35 +757,61 @@ function velFromLevel(level) {
   const db = level > 0 ? 20 * Math.log10(level) : -90;
   return Math.max(1, Math.min(127, Math.round((db + 54) / 48 * 127)));
 }
-// Akkord aus den klingenden Tonklassen ableiten (Name oder '').
+// Akkord-Typen: [Suffix, Intervalle, Prior]. Der Prior bevorzugt bei
+// Mehrdeutigkeit die haeufigen Dreiklaenge -- Vierklaenge (7/maj7/m7) und
+// sus/dim/aug muessen sich gegen einen kleinen Abschlag durchsetzen, damit
+// Oberton-Leckstrom (z. B. eine schwache Quinte->maj7) keinen Vierklang
+// vortaeuscht.
 const CHORD_TYPES = [
-  ['',     [0, 4, 7]],        // Dur
-  ['m',    [0, 3, 7]],        // Moll
-  ['dim',  [0, 3, 6]],
-  ['aug',  [0, 4, 8]],
-  ['7',    [0, 4, 7, 10]],
-  ['maj7', [0, 4, 7, 11]],
-  ['m7',   [0, 3, 7, 10]],
-  ['sus4', [0, 5, 7]],
-  ['sus2', [0, 2, 7]],
+  ['',     [0, 4, 7],      1.00],   // Dur
+  ['m',    [0, 3, 7],      1.00],   // Moll
+  ['dim',  [0, 3, 6],      0.94],
+  ['aug',  [0, 4, 8],      0.92],
+  ['7',    [0, 4, 7, 10],  0.98],
+  ['maj7', [0, 4, 7, 11],  0.97],
+  ['m7',   [0, 3, 7, 10],  0.97],
+  ['sus4', [0, 5, 7],      0.95],
+  ['sus2', [0, 2, 7],      0.95],
 ];
-function chordName(pcList) {
-  const present = new Set(pcList);
-  if (present.size < 3) return '';
-  let best = '', bestScore = 0.5;
+// Bester Akkord zu einem 12er-Chroma (Tonklassen-Gewichte) per Cosinus-
+// Aehnlichkeit gegen die Akkord-Templates -- die Standardmethode der Akkord-
+// erkennung (Template-Matching, Fujishima). Der Grundton ist im Template
+// staerker gewichtet (Bass-Evidenz), das stabilisiert Inversion/Mehrdeutigkeit.
+// Liefert { root, typeIdx, score, margin } oder null; margin = Abstand zum
+// besten Akkord mit ANDEREM Grundton (klein bei Nicht-Akkorden/Rauschen).
+function bestChord(pcw) {
+  let nv = 0; for (let i = 0; i < 12; i++) nv += pcw[i] * pcw[i];
+  nv = Math.sqrt(nv); if (nv <= 0) return null;
+  const ranked = [];
   for (let root = 0; root < 12; root++) {
-    if (!present.has(root)) continue;          // Grundton muss klingen
-    for (const [suffix, ivs] of CHORD_TYPES) {
-      let matched = 0;
-      for (const iv of ivs) if (present.has((root + iv) % 12)) matched++;
-      const missing = ivs.length - matched, extra = present.size - matched;
-      const score = matched - 0.9 * missing - 0.5 * extra;
-      if (matched >= 3 && score > bestScore) {
-        bestScore = score; best = NOTE_NAMES[root] + suffix;
-      }
+    for (let ti = 0; ti < CHORD_TYPES.length; ti++) {
+      const ivs = CHORD_TYPES[ti][1];
+      const tpl = new Float32Array(12);
+      for (const iv of ivs) tpl[(root + iv) % 12] = 1;
+      tpl[root] = CHORD_ROOT_W;
+      let dot = 0, tn = 0;
+      for (let i = 0; i < 12; i++) { dot += tpl[i] * pcw[i]; tn += tpl[i] * tpl[i]; }
+      const score = CHORD_TYPES[ti][2] * dot / (nv * Math.sqrt(tn));
+      ranked.push({ root, typeIdx: ti, score });
     }
   }
+  ranked.sort((a, b) => b.score - a.score);
+  const best = ranked[0];
+  const second = ranked.find(r => r.root !== best.root);
+  best.margin = second ? best.score - second.score : best.score;
   return best;
+}
+// Sauberes Akkord-Voicing (Grundstellung) in dem Register, in dem gespielt
+// wurde: der Grundton wird in die Oktave bei/unter der erkannten Bassnote
+// gelegt, darueber die uebrigen Akkordtoene. So klingt ein tief gegriffener
+// Akkord tief, ein hoher hoch -- unabhaengig von Fehltoenen.
+function buildChordVoicing(root, ivs, baseMidi) {
+  let rootMidi = root + 12 * Math.round((baseMidi - root) / 12);
+  if (rootMidi > baseMidi) rootMidi -= 12;
+  while (rootMidi < NOTE_MIN_MIDI) rootMidi += 12;
+  const v = [];
+  for (const iv of ivs) { let n = rootMidi + iv; while (n > NOTE_MAX_MIDI) n -= 12; v.push(n); }
+  return [...new Set(v)].sort((a, b) => a - b);
 }
 // YIN-Tonhoehe (monophon): kumulative mittlere Differenz + Schwelle +
 // Parabel-Interpolation. Rueckgabe Frequenz in Hz oder 0 (kein Ton).
@@ -761,22 +843,34 @@ function yinPitch(buf, sr, threshold) {
 }
 
 class NoteEngine {
-  constructor(sampleRate, poly, send) {
+  constructor(sampleRate, mode, send) {
     this.sr = sampleRate;
-    this.poly = poly;
+    this.mode = mode;                 // 'mono' | 'poly' | 'chord'
+    this.useFft = (mode === 'poly' || mode === 'chord');   // beide brauchen das Spektrum
     this.send = send;                 // (bytes[]) => void
-    this.win = poly ? 4096 : 2048;    // Analysefenster (poly braucht mehr Aufloesung)
+    this.win = this.useFft ? 4096 : 2048;   // Analysefenster (Spektrum braucht mehr Aufloesung)
     this.buf = new Float32Array(this.win);
     this.filled = 0;
     this.display = '—';
     this.transpose = 0;               // Oktav-Transponierung der Ausgabe (Halbtoene)
     this.curNote = -1; this.candNote = -1; this.candN = 0; this.offCount = 0;   // mono
     this.active = new Map();          // poly: midi -> Anzahl Frames ohne Beleg
-    if (poly) {
+    this.chordNotes = []; this.chordRoot = -1; this.chordTypeIdx = -1; this.candKey = ''; this.chordChroma = null;   // Akkord
+    // Live kalibrierbare Tracking-Parameter (Default = die globalen Konstanten;
+    // das Kalibrier-Panel ueberschreibt sie zur Laufzeit).
+    this.silenceRms = NOTE_SILENCE_RMS;     // Anschlag-Schwelle (neue Note/Ton startet)
+    this.sustainRms = NOTE_SUSTAIN_RMS;     // Halte-Schwelle (gehaltener Ton bleibt an)
+    this.offFrames = NOTE_OFF_FRAMES;       // leise Frames bis Note-Off (mono)
+    this.yinThreshold = YIN_THRESHOLD;      // YIN-Schwelle (mono)
+    this.changeFrames = 2;                  // Frames zur Bestaetigung eines Tonwechsels (mono)
+    this.chordConfirm = CHORD_CONFIRM;      // Frames zur Bestaetigung eines neuen Akkords
+    this.chordOffFrames = CHORD_OFF_FRAMES; // leise Frames bis Akkord-Off
+    if (this.useFft) {
       this.fft = new FFT(this.win);
       this.re = new Float32Array(this.win);
       this.im = new Float32Array(this.win);
       this.han = new Float32Array(this.win);
+      this.spec = new Float32Array(this.win >> 1);   // Betragsspektrum (Akkord-Chroma + Bass)
       for (let i = 0; i < this.win; i++) this.han[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (this.win - 1));
     }
   }
@@ -788,7 +882,9 @@ class NoteEngine {
   }
   process(level) {
     if (this.filled < this.win) return;
-    if (this.poly) this._poly(level); else this._mono(level);
+    if (this.mode === 'mono') this._mono(level);
+    else if (this.mode === 'poly') this._poly(level);
+    else this._chord(level);
   }
   // Note-On/Off mit Oktav-Transponierung (auf MIDI-Bereich begrenzt). Da die
   // Transponierung beim Senden angewandt wird, passen On und Off zusammen.
@@ -804,9 +900,9 @@ class NoteEngine {
     let note = -1;
     // Zum HALTEN einer Note genuegt ein niedrigerer Pegel (Hysterese) -- ein
     // ausklingender Ton reisst so nicht ab und wird nicht neu getriggert.
-    const gate = this.curNote !== -1 ? NOTE_SUSTAIN_RMS : NOTE_SILENCE_RMS;
+    const gate = this.curNote !== -1 ? this.sustainRms : this.silenceRms;
     if (level > gate) {
-      const f = yinPitch(this.buf, this.sr, YIN_THRESHOLD);
+      const f = yinPitch(this.buf, this.sr, this.yinThreshold);
       if (f > 0) {
         const m = Math.round(69 + 12 * Math.log2(f / 440));
         if (m >= NOTE_MIN_MIDI && m <= NOTE_MAX_MIDI) note = m;
@@ -818,10 +914,10 @@ class NoteEngine {
     if (note === -1) {
       // Keine klare Tonhoehe. Klingt noch genug Pegel? -> Note halten
       // (YIN findet beim Ausklingen oft kurz nichts). Sonst nach Entprellung aus.
-      if (this.curNote !== -1 && level > NOTE_SUSTAIN_RMS) {
+      if (this.curNote !== -1 && level > this.sustainRms) {
         this.offCount = 0;
       } else if (this.curNote !== -1) {
-        if (++this.offCount >= NOTE_OFF_FRAMES) {
+        if (++this.offCount >= this.offFrames) {
           this._noteOff(this.curNote); this.curNote = -1; this.offCount = 0; this.display = '—';
         }
       }
@@ -831,7 +927,7 @@ class NoteEngine {
     // neuer Ton (anders als der gehaltene) -> Wechsel kurz entprellen
     this.offCount = 0;
     if (note === this.candNote) this.candN++; else { this.candNote = note; this.candN = 1; }
-    const need = (this.curNote === -1) ? 1 : 2;
+    const need = (this.curNote === -1) ? 1 : this.changeFrames;
     if (this.candN >= need) {
       if (this.curNote !== -1) this._noteOff(this.curNote);
       this._noteOn(note, velFromLevel(level));
@@ -839,55 +935,59 @@ class NoteEngine {
       this.display = midiName(this._out(note));
     }
   }
-  _poly(level) {
-    // Harmonische-Summen-Salienz mit iterativer Oberton-Ausloeschung:
-    // Fuer jede Kandidaten-Note wird die Magnitude ihrer Obertonreihe summiert
-    // (Grundton am staerksten gewichtet). Die staerkste Note wird akzeptiert,
-    // ihre Obertonreihe aus dem Spektrum geloescht und neu gesucht -- so wird
-    // ein Oberton nicht faelschlich als eigene Note erkannt.
-    const detected = new Set();
-    if (level > NOTE_SILENCE_RMS) {
-      const N = this.win, re = this.re, im = this.im, han = this.han;
-      for (let i = 0; i < N; i++) { re[i] = this.buf[i] * han[i]; im[i] = 0; }
-      this.fft.transform(re, im);
-      const half = N >> 1, spec = new Float32Array(half);
-      let maxMag = 0;
-      for (let k = 1; k < half; k++) { const m = Math.hypot(re[k], im[k]); spec[k] = m; if (m > maxMag) maxMag = m; }
-      if (maxMag > 0) {
-        const nyq = this.sr / 2, scale = N / this.sr;
-        const harmAt = (f) => {                  // Peak-Magnitude nahe f (+/-2 Bins)
-          const b = Math.round(f * scale);
-          const lo = Math.max(1, b - 2), hi = Math.min(half - 1, b + 2);
-          let mx = 0; for (let k = lo; k <= hi; k++) if (spec[k] > mx) mx = spec[k];
-          return mx;
-        };
-        let firstSal = 0;
-        for (let iter = 0; iter < NOTE_MAX_POLY; iter++) {
-          let bestM = -1, bestS = 0;
-          for (let m = NOTE_MIN_MIDI; m <= NOTE_MAX_MIDI; m++) {
-            if (detected.has(m)) continue;
-            const f0 = 440 * Math.pow(2, (m - 69) / 12);
-            if (f0 < 50 || f0 >= nyq) continue;
-            let s = 0;
-            for (let h = 1; h <= POLY_HARMONICS; h++) {
-              const f = f0 * h; if (f >= nyq) break;
-              s += harmAt(f) / h;                // Grundton am staerksten gewichtet
-            }
-            if (s > bestS) { bestS = s; bestM = m; }
-          }
-          if (bestM < 0) break;
-          if (iter === 0) firstSal = bestS;
-          else if (bestS < firstSal * POLY_REL_THRESH) break;
-          detected.add(bestM);
-          const f0 = 440 * Math.pow(2, (bestM - 69) / 12);   // Obertonreihe loeschen
-          for (let h = 1; h <= POLY_HARMONICS; h++) {
-            const f = f0 * h; if (f >= nyq) break;
-            const b = Math.round(f * scale), w = POLY_CANCEL_BINS;
-            for (let k = Math.max(0, b - w); k <= Math.min(half - 1, b + w); k++) spec[k] = 0;
-          }
+  // Salienz-Notenerkennung (poly + Akkord gemeinsam): harmonische-Summen-
+  // Salienz mit iterativer Oberton-Ausloeschung. Fuer jede Kandidaten-Note wird
+  // die Magnitude ihrer Obertonreihe summiert (Grundton am staerksten); die
+  // staerkste Note wird akzeptiert, ihre Obertonreihe geloescht und neu gesucht
+  // -- so wird ein Oberton nicht faelschlich als eigene Note erkannt. Liefert
+  // die Toene als [{ m, sal }, ...] nach Salienz absteigend, ohne Note On/Off.
+  _salientNotes(level) {
+    const out = [];
+    if (level <= this.silenceRms) return out;
+    const N = this.win, re = this.re, im = this.im, han = this.han;
+    for (let i = 0; i < N; i++) { re[i] = this.buf[i] * han[i]; im[i] = 0; }
+    this.fft.transform(re, im);
+    const half = N >> 1, spec = new Float32Array(half);
+    let maxMag = 0;
+    for (let k = 1; k < half; k++) { const m = Math.hypot(re[k], im[k]); spec[k] = m; if (m > maxMag) maxMag = m; }
+    if (maxMag <= 0) return out;
+    const nyq = this.sr / 2, scale = N / this.sr;
+    const taken = new Set();
+    const harmAt = (f) => {                       // Peak-Magnitude nahe f (+/-2 Bins)
+      const b = Math.round(f * scale);
+      const lo = Math.max(1, b - 2), hi = Math.min(half - 1, b + 2);
+      let mx = 0; for (let k = lo; k <= hi; k++) if (spec[k] > mx) mx = spec[k];
+      return mx;
+    };
+    let firstSal = 0;
+    for (let iter = 0; iter < NOTE_MAX_POLY; iter++) {
+      let bestM = -1, bestS = 0;
+      for (let m = NOTE_MIN_MIDI; m <= NOTE_MAX_MIDI; m++) {
+        if (taken.has(m)) continue;
+        const f0 = 440 * Math.pow(2, (m - 69) / 12);
+        if (f0 < 50 || f0 >= nyq) continue;
+        let s = 0;
+        for (let h = 1; h <= POLY_HARMONICS; h++) {
+          const f = f0 * h; if (f >= nyq) break;
+          s += harmAt(f) / h;                     // Grundton am staerksten gewichtet
         }
+        if (s > bestS) { bestS = s; bestM = m; }
+      }
+      if (bestM < 0) break;
+      if (iter === 0) firstSal = bestS;
+      else if (bestS < firstSal * POLY_REL_THRESH) break;
+      taken.add(bestM); out.push({ m: bestM, sal: bestS });
+      const f0 = 440 * Math.pow(2, (bestM - 69) / 12);   // Obertonreihe loeschen
+      for (let h = 1; h <= POLY_HARMONICS; h++) {
+        const f = f0 * h; if (f >= nyq) break;
+        const b = Math.round(f * scale), w = POLY_CANCEL_BINS;
+        for (let k = Math.max(0, b - w); k <= Math.min(half - 1, b + w); k++) spec[k] = 0;
       }
     }
+    return out;
+  }
+  _poly(level) {
+    const detected = new Set(this._salientNotes(level).map(o => o.m));
     const vel = velFromLevel(level);
     for (const m of detected) {
       if (!this.active.has(m)) this._noteOn(m, vel);
@@ -899,15 +999,91 @@ class NoteEngine {
       else this.active.set(m, miss + 1);
     }
     const on = [...this.active.keys()].filter(m => this.active.get(m) === 0).sort((a, b) => a - b);
-    const ch = chordName(on.map(m => ((m % 12) + 12) % 12));
-    this.display = on.length
-      ? on.map(m => midiName(this._out(m))).join(' ') + (ch ? '  (' + ch + ')' : '')
-      : '—';
+    this.display = on.length ? on.map(m => midiName(this._out(m))).join(' ') : '—';
+  }
+  // Chroma (12 Tonklassen-Gewichte) + Bassnote aus dem Spektrum fuer die
+  // Akkorderkennung. Plain-Chroma aus dem Grundton-Bereich (CHORD_FMIN..FMAX):
+  // robuster fuer Akkorde als die diskrete Notenliste (die einzelne Akkordtoene
+  // verliert oder Phantomnoten erzeugt). Liefert { chroma, baseMidi } oder null.
+  _chordChromaFrame() {
+    const N = this.win, re = this.re, im = this.im, han = this.han, spec = this.spec;
+    for (let i = 0; i < N; i++) { re[i] = this.buf[i] * han[i]; im[i] = 0; }
+    this.fft.transform(re, im);
+    const half = N >> 1;
+    const kMin = Math.max(1, Math.floor(CHORD_FMIN * N / this.sr));
+    const kMax = Math.min(half - 1, Math.ceil(CHORD_FMAX * N / this.sr));
+    let gmax = 0;
+    for (let k = kMin; k <= kMax; k++) { const m = Math.hypot(re[k], im[k]); spec[k] = m; if (m > gmax) gmax = m; }
+    if (gmax <= 0) return null;
+    const chroma = new Float32Array(12);
+    for (let k = kMin; k <= kMax; k++) {
+      const f = k * this.sr / N;
+      const pc = (((Math.round(12 * Math.log2(f / 440) + 69)) % 12) + 12) % 12;
+      chroma[pc] += spec[k];
+    }
+    let cm = 0; for (let i = 0; i < 12; i++) if (chroma[i] > cm) cm = chroma[i];
+    if (cm <= 0) return null;
+    for (let i = 0; i < 12; i++) chroma[i] /= cm;
+    // Bassnote: tiefste markante Spektralspitze (>=25% Maximum) im Bassbereich.
+    const kB1 = Math.min(kMax, Math.floor(420 * N / this.sr));
+    let baseMidi = 52;
+    for (let k = kMin + 1; k < kB1; k++) {
+      if (spec[k] > 0.25 * gmax && spec[k] >= spec[k - 1] && spec[k] >= spec[k + 1]) {
+        baseMidi = Math.round(12 * Math.log2((k * this.sr / N) / 440) + 69); break;
+      }
+    }
+    return { chroma, baseMidi };
+  }
+  // Akkord-Modus: aus den erkannten Toenen den passenden Akkord bestimmen und
+  // als sauberes Voicing senden. Toene, die nicht zum Akkord gehoeren (oft nur
+  // Fehlerkennungen), fallen dabei weg. Ein erkannter Akkord wird GEHALTEN, bis
+  // ein anderer sicher erkannt wird oder Stille eintritt -- kein Geflacker.
+  _chord(level) {
+    const gate = this.chordRoot !== -1 ? this.sustainRms : this.silenceRms;
+    if (level <= gate) {                          // Stille -> Akkord entprellt beenden
+      if (this.chordRoot !== -1 && ++this.offCount >= this.chordOffFrames) this._chordOff();
+      this.candKey = ''; this.candN = 0;
+      return;
+    }
+    this.offCount = 0;
+    const fr = this._chordChromaFrame();
+    if (!fr) { this.candKey = ''; this.candN = 0; return; }
+    // Chroma ueber Frames glaetten -> stabiler Akkord, Einzelframe-Mulm gemittelt.
+    if (!this.chordChroma) this.chordChroma = fr.chroma;
+    else for (let i = 0; i < 12; i++) this.chordChroma[i] = (1 - CHORD_EMA) * this.chordChroma[i] + CHORD_EMA * fr.chroma[i];
+    const match = bestChord(this.chordChroma);
+    // Kein klarer Akkord (zu unaehnlich ODER mehrdeutig) -> aktuellen halten.
+    if (!match || match.score < CHORD_MIN_SCORE || match.margin < CHORD_MIN_MARGIN) {
+      this.candKey = ''; this.candN = 0; return;
+    }
+    const key = match.root * 100 + match.typeIdx;
+    if (this.chordRoot !== -1 && key === this.chordRoot * 100 + this.chordTypeIdx) {
+      this.candKey = ''; this.candN = 0; return;  // gleicher Akkord -> halten (kein Neutrigger)
+    }
+    if (key === this.candKey) this.candN++; else { this.candKey = key; this.candN = 1; }
+    const need = (this.chordRoot === -1) ? 1 : this.chordConfirm;
+    if (this.candN >= need) {                      // neuer Akkord bestaetigt -> umschalten
+      for (const m of this.chordNotes) this._noteOff(m);   // alten Akkord beenden
+      const voicing = buildChordVoicing(match.root, CHORD_TYPES[match.typeIdx][1], fr.baseMidi);
+      const vel = velFromLevel(level);
+      for (const m of voicing) this._noteOn(m, vel);
+      this.chordNotes = voicing; this.chordRoot = match.root; this.chordTypeIdx = match.typeIdx;
+      this.candKey = ''; this.candN = 0;
+      const name = NOTE_NAMES[match.root] + CHORD_TYPES[match.typeIdx][0];
+      this.display = name + '  ' + voicing.map(m => midiName(this._out(m))).join(' ');
+    }
+  }
+  _chordOff() {
+    for (const m of this.chordNotes) this._noteOff(m);
+    this.chordNotes = []; this.chordRoot = -1; this.chordTypeIdx = -1;
+    this.offCount = 0; this.chordChroma = null; this.display = '—';
   }
   allOff() {
     if (this.curNote !== -1) { this._noteOff(this.curNote); this.curNote = -1; }
     for (const m of this.active.keys()) this._noteOff(m);
     this.active.clear();
+    for (const m of this.chordNotes) this._noteOff(m);
+    this.chordNotes = []; this.chordRoot = -1; this.chordTypeIdx = -1; this.candKey = ''; this.chordChroma = null;
     this.offCount = 0; this.candNote = -1; this.candN = 0;
     this.display = '—';
   }
@@ -920,9 +1096,11 @@ const clock = new MidiClock();
 let midiAccess = null;
 let audioCtx = null;
 let procNode = null;           // ScriptProcessorNode
+let procSrc = null;            // MediaStreamSource (fuer Live-Umbau bei Latenz-Wechsel)
 let sinkNode = null;           // stumm geschalteter Gain-Knoten zum Ausgang
 let mediaStream = null;
 let analyzer = null;
+let noteBlockSize = 512;       // Audioblock im Noten-/Akkord-Modus (Latenz); kalibrierbar
 
 let estimates = [];
 let lastRaw = 0;
@@ -938,7 +1116,7 @@ let grantedLabel = '';
 let midiRequested = false;
 
 // Betriebsart + Noten-Modus
-let opMode = 'clock';          // 'clock' | 'file' | 'mono' | 'poly'
+let opMode = 'clock';          // 'clock' | 'file' | 'mono' | 'poly' | 'chord'
 let noteEngine = null;
 let midiOut = null;            // aktiver MIDI-Ausgang (auch fuer Noten-Modus)
 
@@ -976,6 +1154,13 @@ const elStartStop = $('startStop');
 const elOctave = $('octave');
 const elSrcField = $('srcField'), elInField = $('inField'), elKeyField = $('keyField'), elOctField = $('octField');
 const elFileField = $('fileField'), elFileBtn = $('fileBtn'), elFileNameLbl = $('fileNameLbl'), elAudioFile = $('audioFile');
+const elCalibField = $('calibField'), elCalibToggle = $('calibToggle'), elCalibPanel = $('calibPanel');
+const elCalibReset = $('calibReset'), elCalibNote = $('calibNote');
+const cLat = $('cLatency'), cLatV = $('cLatencyV'), cSil = $('cSilence'), cSilV = $('cSilenceV');
+const cSus = $('cSustain'), cSusV = $('cSustainV'), cOff = $('cOff'), cOffV = $('cOffV');
+const cYin = $('cYin'), cYinV = $('cYinV'), cChg = $('cChange'), cChgV = $('cChangeV');
+const CALIB_BLOCKS = [256, 512, 1024, 2048];
+let calibVisible = false;
 let noteTranspose = 0;            // Oktav-Transponierung (Halbtoene) fuer die Noten-Ausgabe
 
 // --- Web MIDI (erst bei Bedarf anfragen) ---
@@ -1084,7 +1269,7 @@ function applySource() {
 
 // Steuerelement-Zustand je nach Betriebsart (Clock / Datei / Noten-Modus).
 function applyModeControls() {
-  const note = (opMode === 'mono' || opMode === 'poly');
+  const note = (opMode === 'mono' || opMode === 'poly' || opMode === 'chord');
   const file = opMode === 'file';
   elMin.disabled = note;               // BPM-Bereich: Clock + Datei nutzen ihn, Noten nicht
   elMax.disabled = note;
@@ -1097,7 +1282,7 @@ function applyModeControls() {
 }
 function applyMode() {
   opMode = elMode.value;
-  const note = (opMode === 'mono' || opMode === 'poly');
+  const note = (opMode === 'mono' || opMode === 'poly' || opMode === 'chord');
   const file = opMode === 'file';
   if (!file) resetFileMode();          // Datei-Audio freigeben, wenn der Modus verlassen wird
   // Felder ein-/ausblenden
@@ -1107,7 +1292,7 @@ function applyMode() {
   elKeyField.style.display  = file ? 'none' : '';
   elOctField.style.display  = file ? 'none' : '';
   applyModeControls();
-  elBpmCap.textContent = note ? (opMode === 'poly' ? 'NOTEN' : 'NOTE') : 'BPM';
+  elBpmCap.textContent = note ? (opMode === 'chord' ? 'AKKORD' : opMode === 'poly' ? 'NOTEN' : 'NOTE') : 'BPM';
   elBpm.classList.toggle('notes', note);
   setBpmText('—');
   elRaw.textContent = (opMode === 'clock') ? 'roh: —' : '';
@@ -1127,15 +1312,61 @@ function applyMode() {
       if (opMode === 'mono') {
         setHint('Monophon: erkennt EINE Note (Gesang/Bass/Lead/einzelnes Instrument) und sendet '
               + 'sie als MIDI-Note. Klare, einstimmige Quelle nötig. MIDI-Ausgang wählen.');
-      } else {
+      } else if (opMode === 'poly') {
         setHint('Polyphon: erkennt mehrere Noten gleichzeitig (begrenzte Genauigkeit, etwas höhere '
               + 'Latenz). MIDI-Ausgang wählen.');
+      } else {
+        setHint('Akkorde: erkennt aus dem Klang einen Akkord (z. B. mit der Gitarre angeschlagen) und '
+              + 'sendet ihn als saubere MIDI-Akkordnoten. Falsch erkannte Einzeltöne werden weggefiltert. '
+              + 'MIDI-Ausgang wählen.');
       }
     } else {
       if (keyEnabled) elKeyBlock.style.display = '';
       applySource();
     }
   }
+  if (note) loadCalibDefaults(opMode);   // sinnvolle Kalibrier-Startwerte je Modus
+  updateCalibPanel();
+}
+
+// --- Kalibrierung (Tracking-Feinjustage per Slider) ---
+function dbToRms(db) { return Math.pow(10, db / 20); }
+function calibBlockMs(block) { const sr = audioCtx ? audioCtx.sampleRate : 44100; return Math.round(block / sr * 1000); }
+function syncCalibLabels() {
+  noteBlockSize = CALIB_BLOCKS[+cLat.value];
+  const ms = calibBlockMs(noteBlockSize);
+  cLatV.textContent = noteBlockSize + ' · ~' + ms + ' ms';
+  cSilV.textContent = (+cSil.value) + ' dB';
+  cSusV.textContent = (+cSus.value) + ' dB';
+  cOffV.textContent = (+cOff.value) + ' · ~' + Math.round((+cOff.value) * ms) + ' ms';
+  cYinV.textContent = (+cYin.value).toFixed(2);
+  cChgV.textContent = (+cChg.value) + ' · ~' + Math.round((+cChg.value) * ms) + ' ms';
+}
+function applyCalibToEngine(eng) {
+  if (!eng) return;
+  eng.silenceRms = dbToRms(+cSil.value);
+  eng.sustainRms = dbToRms(+cSus.value);
+  eng.yinThreshold = +cYin.value;
+  if (opMode === 'chord') { eng.chordOffFrames = +cOff.value; eng.chordConfirm = +cChg.value; }
+  else { eng.offFrames = +cOff.value; eng.changeFrames = +cChg.value; }
+}
+function loadCalibDefaults(mode) {
+  cLat.value = (mode === 'chord') ? 2 : 1;   // Akkord: 1024 (stabiler), sonst 512 (geringe Latenz)
+  cSil.value = -48; cSus.value = -56; cYin.value = 0.15;
+  if (mode === 'chord') { cOff.value = 6; cChg.value = 3; }
+  else { cOff.value = 3; cChg.value = 2; }
+  syncCalibLabels();
+}
+function updateCalibPanel() {
+  const note = (opMode === 'mono' || opMode === 'poly' || opMode === 'chord');
+  elCalibField.style.display = note ? '' : 'none';
+  if (!note) { elCalibPanel.style.display = 'none'; return; }
+  elCalibPanel.querySelectorAll('.calibrow').forEach(row => {
+    row.style.display = (row.dataset.modes || '').split(' ').includes(opMode) ? '' : 'none';
+  });
+  elCalibNote.textContent = 'Wirkt sofort. Kleinere Latenz = schnellere Reaktion (mehr CPU); '
+    + 'sehr kleine Werte können das Tracking unruhiger machen.';
+  elCalibPanel.style.display = calibVisible ? '' : 'none';
 }
 
 // Liefert den MediaStream je nach Quelle. 'display' nutzt die Screen-Capture-
@@ -1162,6 +1393,47 @@ async function acquireStream(mode) {
   const constraints = { audio };
   if (elInput.value) constraints.audio.deviceId = { exact: elInput.value };
   return navigator.mediaDevices.getUserMedia(constraints);
+}
+
+// Audioblock-Callback (gemeinsam fuer Clock- und Noten-/Akkord-Modus). Als
+// benannte Funktion ausgelagert, damit der Block (Latenz) zur Laufzeit getauscht
+// werden kann, ohne die Sitzung neu zu starten.
+function processAudioEvent(ev) {
+  const noteMode = (opMode === 'mono' || opMode === 'poly' || opMode === 'chord');
+  const ib = ev.inputBuffer;
+  const chs = ib.numberOfChannels, n = ib.length;
+  const mono = new Float32Array(n);
+  for (let c = 0; c < chs; c++) {
+    const d = ib.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += d[i];
+  }
+  if (chs > 1) for (let i = 0; i < n; i++) mono[i] /= chs;
+  if (noteMode) {
+    if (!noteEngine) return;
+    let sum = 0; for (let i = 0; i < n; i++) sum += mono[i] * mono[i];
+    const rms = Math.sqrt(sum / n);
+    levelEma = 0.85 * levelEma + 0.15 * rms;
+    lastChunkTime = performance.now();
+    noteEngine.push(mono);
+    noteEngine.process(rms);
+  } else {
+    for (let off = 0; off + HOP_SIZE <= n; off += HOP_SIZE) onChunk(mono.subarray(off, off + HOP_SIZE));
+  }
+}
+
+// Den Audioblock (Latenz) im laufenden Betrieb umschalten: neuen Prozessor mit
+// der gewuenschten Blockgroesse einklinken und den alten sauber abhaengen.
+function rebuildNoteProcessor() {
+  if (!running || !audioCtx || !procSrc || !sinkNode) return;
+  if (!(opMode === 'mono' || opMode === 'poly' || opMode === 'chord')) return;
+  try {
+    const np = audioCtx.createScriptProcessor(noteBlockSize, 1, 1);
+    np.onaudioprocess = processAudioEvent;
+    procSrc.connect(np);
+    np.connect(sinkNode);
+    if (procNode) { try { procNode.disconnect(); } catch (e) {} procNode.onaudioprocess = null; }
+    procNode = np;
+  } catch (e) {}
 }
 
 // --- Sitzung starten / stoppen ---
@@ -1200,40 +1472,22 @@ async function start() {
     const sr = audioCtx.sampleRate;
 
     if (noteMode) {
-      noteEngine = new NoteEngine(sr, opMode === 'poly',
+      noteEngine = new NoteEngine(sr, opMode,
         (bytes) => { if (midiOut) { try { midiOut.send(bytes); } catch (e) {} } });
       noteTranspose = (parseInt(elOctave.value, 10) || 0) * 12;
       noteEngine.transpose = noteTranspose;
+      applyCalibToEngine(noteEngine);     // kalibrierte Tracking-Parameter uebernehmen
     } else {
       analyzer = new TempoAnalyzer(sr, minBpm, maxBpm);
     }
 
-    const src = audioCtx.createMediaStreamSource(mediaStream);
+    procSrc = audioCtx.createMediaStreamSource(mediaStream);
     // ScriptProcessorNode statt AudioWorklet: laedt kein Modul -> auch unter
-    // file:// nutzbar. Im Noten-Modus kleinere Bloecke (geringere Latenz).
-    const bufSize = noteMode ? 1024 : 2048;
+    // file:// nutzbar. Im Noten-Modus bestimmt der Block die Latenz (kalibrierbar).
+    const bufSize = noteMode ? noteBlockSize : 2048;
     procNode = audioCtx.createScriptProcessor(bufSize, 1, 1);
-    procNode.onaudioprocess = (ev) => {
-      const ib = ev.inputBuffer;
-      const chs = ib.numberOfChannels, n = ib.length;
-      const mono = new Float32Array(n);
-      for (let c = 0; c < chs; c++) {
-        const d = ib.getChannelData(c);
-        for (let i = 0; i < n; i++) mono[i] += d[i];
-      }
-      if (chs > 1) for (let i = 0; i < n; i++) mono[i] /= chs;
-      if (noteMode) {
-        let sum = 0; for (let i = 0; i < n; i++) sum += mono[i] * mono[i];
-        const rms = Math.sqrt(sum / n);
-        levelEma = 0.85 * levelEma + 0.15 * rms;
-        lastChunkTime = performance.now();
-        noteEngine.push(mono);
-        noteEngine.process(rms);
-      } else {
-        for (let off = 0; off + HOP_SIZE <= n; off += HOP_SIZE) onChunk(mono.subarray(off, off + HOP_SIZE));
-      }
-    };
-    src.connect(procNode);
+    procNode.onaudioprocess = processAudioEvent;
+    procSrc.connect(procNode);
     // ScriptProcessor feuert nur, wenn er zum Ausgang verbunden ist.
     // Stumm geschalteter Gain -> kein Ton, keine Rueckkopplung.
     sinkNode = audioCtx.createGain();
@@ -1273,6 +1527,7 @@ function stop() {
   clock.disable();
   if (noteEngine) { noteEngine.allOff(); noteEngine = null; }
   if (procNode) { procNode.disconnect(); procNode.onaudioprocess = null; procNode = null; }
+  if (procSrc) { try { procSrc.disconnect(); } catch (e) {} procSrc = null; }
   if (sinkNode) { sinkNode.disconnect(); sinkNode = null; }
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -1934,7 +2189,7 @@ function render() {
     if (opMode !== 'clock') {
       // Noten-Modus: aktuell gesendete Note(n) anzeigen
       if (performance.now() - lastChunkTime > 1500) setStatus('KEIN AUDIO – Eingang prüfen');
-      else setStatus(opMode === 'poly' ? 'Noten-Modus (polyphon)' : 'Noten-Modus (monophon)');
+      else setStatus(opMode === 'chord' ? 'Akkord-Modus' : opMode === 'poly' ? 'Noten-Modus (polyphon)' : 'Noten-Modus (monophon)');
       const disp = noteEngine ? noteEngine.display : '—';
       elBpm.textContent = disp;
       elBpm.classList.toggle('idle', disp === '—');
@@ -1998,6 +2253,27 @@ elKeyToggle.addEventListener('click', () => {
   if (keyEnabled) updateKeyDisplay();
 });
 
+// Kalibrierung: Panel ein-/ausblenden, Slider live anwenden, zuruecksetzen.
+elCalibToggle.addEventListener('click', () => {
+  calibVisible = !calibVisible;
+  elCalibToggle.textContent = calibVisible ? 'ausblenden' : 'anzeigen';
+  elCalibToggle.classList.toggle('on', calibVisible);
+  updateCalibPanel();
+});
+[cSil, cSus, cOff, cYin, cChg].forEach(el => el.addEventListener('input', () => {
+  syncCalibLabels();
+  if (running && noteEngine) applyCalibToEngine(noteEngine);
+}));
+cLat.addEventListener('input', () => {        // Latenz: Audioblock live umschalten
+  syncCalibLabels();
+  if (running) rebuildNoteProcessor();
+});
+elCalibReset.addEventListener('click', () => {
+  loadCalibDefaults(opMode);
+  if (running && noteEngine) applyCalibToEngine(noteEngine);
+  if (running) rebuildNoteProcessor();
+});
+
 // Datei-Modus: Datei waehlen + bei BPM-Bereichsaenderung neu analysieren
 elFileBtn.addEventListener('click', () => elAudioFile.click());
 elAudioFile.addEventListener('change', (e) => {
@@ -2022,6 +2298,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (elSource.value === 'display') { elSource.value = 'input'; applySource(); }
   }
   refreshAudioInputs();
+  syncCalibLabels();        // Kalibrier-Slider-Beschriftungen initialisieren
   setBpmText('—');
   updateLevel(-60);
   setStatus('bereit');
