@@ -110,8 +110,11 @@ Eine schlanke Browser-Variante ohne Installation liegt als **einzelne Datei**
 in [webapp/index.html](webapp/index.html): BPM-Erkennung mit stabiler
 MIDI-Clock und optionaler Tonart-Anzeige über die Web Audio und Web MIDI API
 (Chrome/Edge). Als Quelle dient ein Audio-Eingang oder die mitgehörte
-Wiedergabe (Tab-/System-Audio über die Screen-Capture-API). Einfach im
-Browser öffnen – kein Server nötig.
+Wiedergabe (Tab-/System-Audio über die Screen-Capture-API). Zusätzlich gibt es
+einen **Datei-Modus**, der eine geladene Audiodatei vorab zu einer Beat-Map
+analysiert und ihre MIDI-Clock **driftfrei** zur Wiedergabe ausgibt, sowie
+einen **Noten-Modus** (Pitch → MIDI, mono-/polyphon). Einfach im Browser
+öffnen – kein Server nötig.
 
 👉 **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
 

@@ -68,6 +68,7 @@ select, input[type="number"] {
 select { min-width: 200px; }
 input[type="number"] { width: 72px; }
 .range { display: flex; align-items: center; gap: 6px; }
+.filelbl { font-size: 13px; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button#startBtn {
   margin-left: auto; background: var(--accent); color: #04342c; border: 0;
   border-radius: 8px; padding: 12px 28px; font-size: 16px; font-weight: 700; cursor: pointer;
@@ -140,18 +141,19 @@ main {
       <label for="opMode">Modus</label>
       <select id="opMode">
         <option value="clock">Tempo &amp; MIDI-Clock</option>
+        <option value="file">Datei → MIDI-Clock (driftfrei)</option>
         <option value="mono">Noten → MIDI (monophon)</option>
         <option value="poly">Noten → MIDI (polyphon)</option>
       </select>
     </div>
-    <div class="field">
+    <div class="field" id="srcField">
       <label for="srcMode">Quelle</label>
       <select id="srcMode">
         <option value="input">Audio-Eingang (Mikrofon/Line-In)</option>
         <option value="display">Wiedergabe mithören (Tab/System)</option>
       </select>
     </div>
-    <div class="field">
+    <div class="field" id="inField">
       <label for="audioIn">Audio-Eingang</label>
       <div class="row">
         <select id="audioIn"></select>
@@ -160,6 +162,14 @@ main {
           Eingänge laden
         </button>
       </div>
+    </div>
+    <div class="field" id="fileField" style="display:none">
+      <label for="audioFile">Audiodatei</label>
+      <div class="row">
+        <button id="fileBtn" class="ghost">Datei wählen…</button>
+        <span id="fileNameLbl" class="filelbl">keine Datei</span>
+      </div>
+      <input type="file" id="audioFile" accept="audio/*" style="display:none">
     </div>
     <div class="field">
       <label for="midiOut">MIDI-Ausgang</label>
@@ -173,7 +183,7 @@ main {
         <input type="number" id="maxBpm" value="140" min="30" max="300" step="1">
       </div>
     </div>
-    <div class="field">
+    <div class="field" id="keyField">
       <label>Tonart</label>
       <button id="keyToggle" class="ghost"
               title="Grundtonart (mit Paralleltonart) anzeigen">anzeigen</button>
@@ -184,7 +194,7 @@ main {
         <input type="checkbox" id="startStop"> senden
       </label>
     </div>
-    <div class="field">
+    <div class="field" id="octField">
       <label for="octave">Oktave ±</label>
       <input type="number" id="octave" value="0" min="-4" max="4" step="1"
              title="Erkannte Noten für die MIDI-Ausgabe um N Oktaven verschieben">
@@ -224,7 +234,7 @@ const TEMPO_PRIOR_OCT  = 0.9;
 const CONF_RATIO       = 1.45;
 const MIN_ONSET_SUM    = 1e-3;
 
-const ANALYSIS_INTERVAL = 1.0;
+const ANALYSIS_INTERVAL = 0.5;   // haeufiger analysieren -> erste BPM frueher + schnellere Stabilisierung
 const BPM_MEDIAN_LEN    = 16;
 const SILENCE_DB        = -55.0;
 const DEFAULT_MIN_BPM   = 70;
@@ -253,6 +263,13 @@ const MSG_CLOCK = 0xF8, MSG_START = 0xFA, MSG_STOP = 0xFC;
 const BEAT_PLL_GAIN     = 0.10;   // Phasen-Anteil pro Beat
 const BEAT_MAX_NUDGE_MS = 6.0;    // max. Phasenkorrektur pro Beat (kein hoerbarer Sprung)
 const BEAT_VALID_MS     = 4000;   // so lange gilt ein Beat-Anker als aktuell
+
+// Datei-Modus: Offline-Beat-Map -> driftfreie Clock gegen die Wiedergabe.
+const FILE_TIGHTNESS         = 100;    // DP-Beat-Tracker: Bindung der Beat-Abstaende ans (lokale) Tempo
+const FILE_LEAD_S            = 0.18;   // Vorlauf vor dem Wiedergabestart (Audio + Scheduler einschwingen)
+const FILE_SCHED_INTERVAL_MS = 25;     // Scheduler-Takt
+const FILE_SCHED_LOOKAHEAD_S = 0.12;   // so weit im Voraus werden Ticks terminiert
+const FILE_CONST_TOL         = 0.015;  // <=1,5% Tempo-Streuung -> "konstant" -> perfektes Raster
 
 // Noten-Modus (Pitch -> MIDI)
 const NOTE_CH          = 0;       // MIDI-Kanal 1
@@ -409,7 +426,9 @@ class TempoAnalyzer {
   }
   estimate() {
     const e = this.onset, L = e.length;
-    if (L < this.envRate * 2) return null;       // ~2 s -> erste BPM erscheint frueher
+    if (L < this.envRate * 0.9) return null;     // ~0,9 s Mindestfenster -> erste BPM erscheint frueh.
+                                                 // Unsichere/instabile Schaetzungen filtert ohnehin CONF_RATIO weiter unten,
+                                                 // d. h. bei undeutlichem Beat wartet die Anzeige automatisch laenger.
     let mean = 0;
     for (let i = 0; i < L; i++) mean += e[i];
     mean /= L;
@@ -917,9 +936,24 @@ let grantedLabel = '';
 let midiRequested = false;
 
 // Betriebsart + Noten-Modus
-let opMode = 'clock';          // 'clock' | 'mono' | 'poly'
+let opMode = 'clock';          // 'clock' | 'file' | 'mono' | 'poly'
 let noteEngine = null;
 let midiOut = null;            // aktiver MIDI-Ausgang (auch fuer Noten-Modus)
+
+// Datei-Modus
+let fileBuffer = null;         // dekodierter AudioBuffer der geladenen Datei
+let fileName = '';
+let fileBeatTimes = null;      // Float64Array: Beat-Zeitpunkte (s ab Dateianfang)
+let fileTickTimes = null;      // Float64Array: alle Clock-Tick-Zeitpunkte (s)
+let fileTempoInfo = null;      // { constant, bpm, bpmMin, bpmMax }
+let fileSource = null;         // AudioBufferSourceNode
+let fileAnalyser = null;       // AnalyserNode (Pegel)
+let fileTimeBuf = null;        // Float32Array fuer den Pegel
+let fileStartCtxTime = 0;      // audioCtx.currentTime beim Start (t0)
+let fileSchedTimer = null;     // Scheduler-Intervall
+let fileNextTickIdx = 0;       // naechster zu sendender Tick
+let fileStartSent = false;     // MIDI-Start schon gesendet?
+let fileAnalyzing = false;     // laeuft die Offline-Analyse?
 
 // Tonart-Zustand (zweistufige Mittelung + Hysterese wie im Python-Kern)
 let keyEnabled = false;
@@ -938,6 +972,8 @@ const elKeyToggle = $('keyToggle'), elKeyBlock = $('keyBlock');
 const elKeyName = $('keyName'), elKeyPar = $('keyPar');
 const elStartStop = $('startStop');
 const elOctave = $('octave');
+const elSrcField = $('srcField'), elInField = $('inField'), elKeyField = $('keyField'), elOctField = $('octField');
+const elFileField = $('fileField'), elFileBtn = $('fileBtn'), elFileNameLbl = $('fileNameLbl'), elAudioFile = $('audioFile');
 let noteTranspose = 0;            // Oktav-Transponierung (Halbtoene) fuer die Noten-Ausgabe
 
 // --- Web MIDI (erst bei Bedarf anfragen) ---
@@ -1044,30 +1080,59 @@ function applySource() {
   }
 }
 
-// Steuerelement-Zustand je nach Betriebsart (Clock vs. Noten-Modus).
+// Steuerelement-Zustand je nach Betriebsart (Clock / Datei / Noten-Modus).
 function applyModeControls() {
-  const note = opMode !== 'clock';
-  elMin.disabled = note; elMax.disabled = note; elKeyToggle.disabled = note;
-  elStartStop.disabled = note;        // Start/Stop nur im Clock-Modus relevant
-  elOctave.disabled = !note;          // Oktav-Transponierung nur im Noten-Modus
+  const note = (opMode === 'mono' || opMode === 'poly');
+  const file = opMode === 'file';
+  elMin.disabled = note;               // BPM-Bereich: Clock + Datei nutzen ihn, Noten nicht
+  elMax.disabled = note;
+  elKeyToggle.disabled = note || file; // Tonart nur im Clock-Modus
+  elStartStop.disabled = note;         // Start/Stop fuer Clock + Datei relevant
+  elOctave.disabled = !note;           // Oktav-Transponierung nur im Noten-Modus
+  elSource.disabled = file;
+  if (!file) { elInput.disabled = (elSource.value === 'display'); elLoad.disabled = (elSource.value === 'display'); }
+  if (elFileBtn) elFileBtn.disabled = !file;
 }
 function applyMode() {
   opMode = elMode.value;
-  const note = opMode !== 'clock';
+  const note = (opMode === 'mono' || opMode === 'poly');
+  const file = opMode === 'file';
+  if (!file) resetFileMode();          // Datei-Audio freigeben, wenn der Modus verlassen wird
+  // Felder ein-/ausblenden
+  elSrcField.style.display  = file ? 'none' : '';
+  elInField.style.display   = file ? 'none' : '';
+  elFileField.style.display = file ? '' : 'none';
+  elKeyField.style.display  = file ? 'none' : '';
+  elOctField.style.display  = file ? 'none' : '';
   applyModeControls();
   elBpmCap.textContent = note ? (opMode === 'poly' ? 'NOTEN' : 'NOTE') : 'BPM';
   elBpm.classList.toggle('notes', note);
   setBpmText('—');
-  if (note) elKeyBlock.style.display = 'none';
-  else if (keyEnabled) elKeyBlock.style.display = '';
-  if (opMode === 'mono') {
-    setHint('Monophon: erkennt EINE Note (Gesang/Bass/Lead/einzelnes Instrument) und sendet '
-          + 'sie als MIDI-Note. Klare, einstimmige Quelle nötig. MIDI-Ausgang wählen.');
-  } else if (opMode === 'poly') {
-    setHint('Polyphon: erkennt mehrere Noten gleichzeitig (begrenzte Genauigkeit, etwas höhere '
-          + 'Latenz). MIDI-Ausgang wählen.');
+  elRaw.textContent = (opMode === 'clock') ? 'roh: —' : '';
+  if (file) {
+    elKeyBlock.style.display = 'none';
+    elStart.textContent = 'Abspielen & senden';
+    elStart.classList.remove('stop');
+    elStart.disabled = !(fileBuffer && fileTickTimes && fileTickTimes.length);
+    setStatus(fileBuffer ? (fileTempoInfo ? '' : 'bereit') : 'keine Datei');
+    setHint('Datei-Modus: Audiodatei wählen → sie wird offline analysiert (Beat-Map) → die MIDI-Clock '
+          + 'läuft danach driftfrei zur Wiedergabe. Tipp: BPM-Bereich grob passend setzen, dann Datei wählen.');
   } else {
-    applySource();
+    elStart.textContent = 'Start';
+    elStart.disabled = false;
+    if (note) {
+      elKeyBlock.style.display = 'none';
+      if (opMode === 'mono') {
+        setHint('Monophon: erkennt EINE Note (Gesang/Bass/Lead/einzelnes Instrument) und sendet '
+              + 'sie als MIDI-Note. Klare, einstimmige Quelle nötig. MIDI-Ausgang wählen.');
+      } else {
+        setHint('Polyphon: erkennt mehrere Noten gleichzeitig (begrenzte Genauigkeit, etwas höhere '
+              + 'Latenz). MIDI-Ausgang wählen.');
+      }
+    } else {
+      if (keyEnabled) elKeyBlock.style.display = '';
+      applySource();
+    }
   }
 }
 
@@ -1099,6 +1164,7 @@ async function acquireStream(mode) {
 
 // --- Sitzung starten / stoppen ---
 async function start() {
+  if (opMode === 'file') return startFile();
   const minBpm = clampBpm(parseFloat(elMin.value), DEFAULT_MIN_BPM);
   const maxBpm = clampBpm(parseFloat(elMax.value), DEFAULT_MAX_BPM);
   if (!(minBpm < maxBpm)) { setHint('BPM-Bereich ungueltig: von < bis (z. B. 70 bis 140).', true); return; }
@@ -1199,6 +1265,7 @@ async function start() {
 }
 
 function stop() {
+  if (opMode === 'file') return stopFile();
   running = false;
   if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null; }
   clock.disable();
@@ -1219,6 +1286,523 @@ function stop() {
   elRaw.textContent = opMode === 'clock' ? 'roh: —' : '';
   setStatus('bereit');
   updateLevel(-60);
+}
+
+// ===========================================================================
+// Datei-Modus: Datei laden -> OFFLINE Beat-Map -> driftfreie MIDI-Clock, die
+// gegen die Web-Audio-Wiedergabe terminiert wird (kein freilaufender Timer ->
+// kein Drift). Bei variablem Tempo folgt die Clock den gemessenen Beat-
+// Abstaenden; bei konstantem Tempo wird ein mathematisch perfektes Raster
+// erzeugt. Die Tick-Zeiten (Audio-Kontext) werden je Scheduler-Runde ueber
+// audioCtx.getOutputTimestamp() in die performance.now()-Domaene umgerechnet
+// und mit Timestamp an den MIDI-Port geschickt.
+// ===========================================================================
+
+function fileMinBpm() { return clampBpm(parseFloat(elMin.value), DEFAULT_MIN_BPM); }
+function fileMaxBpm() { return clampBpm(parseFloat(elMax.value), DEFAULT_MAX_BPM); }
+
+async function loadFile(file) {
+  if (running) stop();
+  resetFileMode();                       // alten Kontext/Buffer freigeben
+  fileName = (file && file.name) ? file.name : 'Datei';
+  elFileNameLbl.textContent = fileName;
+  elStart.disabled = true;
+  setBpmText('—');
+  setStatus('lade Datei …');
+  setHint('Datei wird gelesen …');
+  let arr;
+  try { arr = await file.arrayBuffer(); }
+  catch (e) { setHint('Datei konnte nicht gelesen werden: ' + e.message, true); setStatus('FEHLER'); return; }
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+  catch (e) { setHint('Audio-Kontext fehlgeschlagen: ' + e.message, true); setStatus('FEHLER'); return; }
+  setStatus('dekodiere …');
+  await new Promise(r => setTimeout(r, 0));
+  try {
+    fileBuffer = await audioCtx.decodeAudioData(arr);
+  } catch (e) {
+    setHint('Audio konnte nicht dekodiert werden (Format nicht unterstützt?): ' + (e && e.message ? e.message : e), true);
+    setStatus('FEHLER'); fileBuffer = null; return;
+  }
+  await analyzeLoadedFile();
+}
+
+async function analyzeLoadedFile() {
+  if (!fileBuffer) return;
+  const minBpm = fileMinBpm(), maxBpm = fileMaxBpm();
+  if (!(minBpm < maxBpm)) { setHint('BPM-Bereich ungültig: von < bis (z. B. 70 bis 140).', true); return; }
+  fileAnalyzing = true;
+  elStart.disabled = true;
+  setStatus('analysiere … 0%');
+  setHint('Beat-Map wird berechnet … (einmalig, je nach Länge ein paar Sekunden)');
+  await new Promise(r => setTimeout(r, 0));
+  let res = null;
+  try {
+    res = await computeBeatMap(fileBuffer, minBpm, maxBpm,
+      (p) => setStatus('analysiere … ' + Math.round(p * 100) + '%'));
+  } catch (e) {
+    fileAnalyzing = false;
+    setHint('Analyse fehlgeschlagen: ' + (e && e.message ? e.message : e), true);
+    setStatus('FEHLER'); return;
+  }
+  fileAnalyzing = false;
+  if (!res || !res.beats || res.beats.length < 2) {
+    fileBeatTimes = null; fileTickTimes = null; fileTempoInfo = null;
+    elStart.disabled = true;
+    setStatus('kein klares Tempo');
+    setHint('Kein klares Tempo gefunden. Anderen BPM-Bereich versuchen oder eine rhythmischere Datei wählen.', true);
+    setBpmText('—');
+    return;
+  }
+  fileBeatTimes = res.beats;
+  fileTempoInfo = res;
+  fileTickTimes = buildTickTimes(res.beats, fileBuffer.duration);
+  fileNextTickIdx = 0;
+  setBpmText(String(Math.round(res.bpm)));
+  if (res.constant) {
+    setStatus('bereit · konstantes Tempo ≈ ' + res.bpm.toFixed(1) + ' BPM · perfektes Raster');
+  } else {
+    setStatus('bereit · variables Tempo ' + Math.round(res.bpmMin) + '–' + Math.round(res.bpmMax) + ' BPM (Ø ' + Math.round(res.bpm) + ')');
+  }
+  setHint('Analyse fertig. MIDI-Ausgang wählen und „Abspielen & senden". Die Clock läuft driftfrei zur Datei – Tab im Vordergrund lassen.');
+  elStart.disabled = false;
+}
+
+// --- Offline-Analyse: Onset-Huellkurve -> globales Tempo -> lokale Tempokurve
+//     -> DP-Beat-Tracking -> Beat-Zeiten; danach konstant/variabel entscheiden.
+async function computeBeatMap(buffer, minBpm, maxBpm, onProgress) {
+  const sr = buffer.sampleRate;
+  const N = buffer.length;
+  const ch = buffer.numberOfChannels;
+  const chans = [];
+  for (let c = 0; c < ch; c++) chans.push(buffer.getChannelData(c));
+  const envRate = sr / HOP_SIZE;                 // Onset-Frames pro Sekunde
+  const nHops = Math.max(1, Math.floor((N - 1) / HOP_SIZE) + 1);
+  const fft = new FFT(FFT_SIZE);
+  const win = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFT_SIZE - 1));
+  const re = new Float32Array(FFT_SIZE), im = new Float32Array(FFT_SIZE);
+  const half = FFT_SIZE >> 1, halfWin = FFT_SIZE >> 1;
+  const prevMag = new Float32Array(half);
+  const onset = new Float32Array(nHops);
+  let havePrev = false;
+  const YIELD_EVERY = 300;
+  // zentrierte Frames: Frame h ist um Sample h*HOP zentriert -> Beat-Zeit = h*HOP/sr
+  for (let h = 0; h < nHops; h++) {
+    const startS = h * HOP_SIZE - halfWin;
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const s = startS + i;
+      let v = 0;
+      if (s >= 0 && s < N) { for (let c = 0; c < ch; c++) v += chans[c][s]; if (ch > 1) v /= ch; }
+      re[i] = v * win[i]; im[i] = 0;
+    }
+    fft.transform(re, im);
+    let flux = 0;
+    for (let k = 0; k < half; k++) {
+      const mag = Math.hypot(re[k], im[k]);
+      const d = mag - prevMag[k];
+      if (d > 0) flux += d;
+      prevMag[k] = mag;
+    }
+    onset[h] = havePrev ? flux : 0;
+    havePrev = true;
+    if ((h % YIELD_EVERY) === 0) { if (onProgress) onProgress(0.7 * h / nHops); await new Promise(r => setTimeout(r, 0)); }
+  }
+  const centerBpm = Math.sqrt(minBpm * maxBpm);
+  const tau0 = globalTempoLag(onset, envRate, minBpm, maxBpm, centerBpm);
+  if (!tau0 || !isFinite(tau0)) return null;
+  if (onProgress) onProgress(0.8); await new Promise(r => setTimeout(r, 0));
+  const period = localPeriodCurve(onset, envRate, tau0, minBpm, maxBpm);
+  if (onProgress) onProgress(0.9); await new Promise(r => setTimeout(r, 0));
+  // lokaler Score = Onset / Standardabweichung (Onset-Schaerfe bleibt -> praezise Beats)
+  let mean = 0; for (let i = 0; i < nHops; i++) mean += onset[i]; mean /= nHops;
+  let vv = 0; for (let i = 0; i < nHops; i++) { const d = onset[i] - mean; vv += d * d; }
+  const std = Math.sqrt(vv / Math.max(1, nHops - 1)) || 1;
+  const local = new Float32Array(nHops);
+  for (let i = 0; i < nHops; i++) local[i] = onset[i] / std;
+  const beatFrames = dpBeats(local, period, FILE_TIGHTNESS);
+  if (beatFrames.length < 2) return null;
+  refineBeats(beatFrames, onset);                // auf naechstgelegene Onset-Spitze ziehen
+  let beats = new Float64Array(beatFrames.length);
+  for (let i = 0; i < beatFrames.length; i++) beats[i] = beatFrames[i] * HOP_SIZE / sr;
+  beats = sanitizeBeats(beats);
+  if (beats.length < 2) return null;
+  // konstant vs. variabel: robuster Median der |Residuen| gegen den Geradenfit
+  // (einzelne fehlgeschnappte Beats kippen die Entscheidung nicht). Schwelle mit
+  // Frame-Quantisierung als Untergrenze (~11 ms Raster nicht ueberbewerten).
+  const fit = lineFit(beats);
+  const resAbs = [];
+  for (let i = 0; i < beats.length; i++) resAbs.push(Math.abs(beats[i] - (fit.a + fit.b * i)));
+  resAbs.sort((a, b) => a - b);
+  const madRes = resAbs[resAbs.length >> 1];
+  const ibis = [];
+  let ibiMin = Infinity, ibiMax = 0;
+  for (let i = 1; i < beats.length; i++) { const d = beats[i] - beats[i - 1]; if (d > 0) { ibis.push(d); if (d < ibiMin) ibiMin = d; if (d > ibiMax) ibiMax = d; } }
+  if (!ibis.length || !isFinite(ibiMin) || ibiMax <= 0) return null;
+  const frameSec = HOP_SIZE / sr;
+  const tolSec = Math.max(FILE_CONST_TOL * fit.b, 1.0 * frameSec);
+  const constant = fit.b > 0 && (1.4826 * madRes) < tolSec;
+  if (onProgress) onProgress(1.0);
+  if (constant) {
+    const b = fit.b, dur = buffer.duration;
+    const k0 = Math.ceil((0 - fit.a) / b - 1e-9);
+    const arr = [];
+    for (let k = k0; ; k++) { const t = fit.a + b * k; if (t > dur) break; if (t >= 0) arr.push(t); }
+    if (arr.length >= 2) {
+      const bpm = 60 / b;
+      return { beats: Float64Array.from(arr), constant: true, bpm: bpm, bpmMin: bpm, bpmMax: bpm };
+    }
+  }
+  // variabel: robuste Kennzahlen (Median + 10/90-Perzentile) -> einzelne Ausreisser-
+  // Beats verfaelschen die Anzeige nicht.
+  const sorted = ibis.slice().sort((a, b) => a - b);
+  const q = (p) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(p * (sorted.length - 1))))];
+  const medIvl = q(0.5);
+  return { beats, constant: false, bpm: 60 / medIvl, bpmMin: 60 / q(0.9), bpmMax: 60 / q(0.1) };
+}
+
+// Globales Tempo per Autokorrelation der Onset-Huellkurve (Harmonienkamm + Prior).
+function globalTempoLag(onset, envRate, minBpm, maxBpm, centerBpm) {
+  const L = onset.length;
+  if (L < envRate * 2) return null;
+  let mean = 0; for (let i = 0; i < L; i++) mean += onset[i]; mean /= L;
+  const x = new Float32Array(L); let energy = 0;
+  for (let i = 0; i < L; i++) { x[i] = onset[i] - mean; energy += x[i] * x[i]; }
+  if (energy <= 0) return null;
+  const lagMin = Math.max(2, Math.floor(60 * envRate / maxBpm));
+  const lagMax = Math.min(L - 2, Math.ceil(60 * envRate / minBpm));
+  if (lagMax <= lagMin) return null;
+  const acfMax = Math.min(L - 2, lagMax * 4);
+  const acf = new Float32Array(acfMax + 1);
+  for (let lag = lagMin; lag <= acfMax; lag++) {
+    let s = 0; const lim = L - lag;
+    for (let i = 0; i < lim; i++) s += x[i] * x[i + lag];
+    acf[lag] = s / energy;
+  }
+  const harmW = [1.0, 0.6, 0.4, 0.25];
+  let best = -Infinity, bestLag = -1;
+  for (let lag = lagMin; lag <= lagMax; lag++) {
+    let comb = 0;
+    for (let hh = 1; hh <= 4; hh++) { const hl = lag * hh; if (hl <= acfMax) comb += harmW[hh - 1] * acf[hl]; }
+    const bpm = 60 * envRate / lag;
+    const lo = Math.log2(bpm / centerBpm) / TEMPO_PRIOR_OCT;
+    const prior = Math.exp(-0.5 * lo * lo);
+    const score = comb * prior;
+    if (score > best) { best = score; bestLag = lag; }
+  }
+  if (bestLag < 0) return null;
+  let lag = bestLag;
+  if (bestLag > lagMin && bestLag < lagMax) {
+    const y0 = acf[bestLag - 1], y1 = acf[bestLag], y2 = acf[bestLag + 1];
+    const den = (y0 - 2 * y1 + y2);
+    if (den !== 0) { const d = 0.5 * (y0 - y2) / den; if (d > -1 && d < 1) lag = bestLag + d; }
+  }
+  return lag;
+}
+
+// Zeitlich variable Periodenkurve (Frames/Beat), oktav-fest um tau0 herum.
+function localPeriodCurve(onset, envRate, tau0, minBpm, maxBpm) {
+  const L = onset.length;
+  const winLen = Math.max(Math.round(6 * envRate), Math.round(5 * tau0));
+  const hop = Math.max(1, Math.round(0.5 * envRate));
+  let lagLo = Math.max(2, Math.round(tau0 * 0.7));
+  let lagHi = Math.round(tau0 * 1.45);
+  lagLo = Math.max(lagLo, Math.floor(60 * envRate / maxBpm));
+  lagHi = Math.min(lagHi, Math.ceil(60 * envRate / minBpm));
+  if (lagHi <= lagLo) { const p = new Float32Array(L); p.fill(tau0); return p; }
+  const knotX = [], knotLag = [];
+  const halfW = winLen >> 1;
+  for (let c = 0; c < L; c += hop) {
+    const s = Math.max(0, c - halfW), e = Math.min(L, c + halfW), n = e - s;
+    if (n <= lagHi + 2) { knotX.push(c); knotLag.push(tau0); continue; }
+    let mean = 0; for (let i = s; i < e; i++) mean += onset[i]; mean /= n;
+    let energy = 0; for (let i = s; i < e; i++) { const v = onset[i] - mean; energy += v * v; }
+    let bestLag = tau0, best = -Infinity;
+    if (energy > 0) {
+      for (let lag = lagLo; lag <= lagHi; lag++) {
+        let acc = 0; const lim = e - lag;
+        for (let i = s; i < lim; i++) acc += (onset[i] - mean) * (onset[i + lag] - mean);
+        const sc = acc / energy;
+        const lo = Math.log2(lag / tau0);
+        const pr = Math.exp(-0.5 * (lo / 0.35) * (lo / 0.35));   // sanfter Prior auf tau0
+        const score = sc * pr;
+        if (score > best) { best = score; bestLag = lag; }
+      }
+    }
+    knotX.push(c); knotLag.push(bestLag);
+  }
+  // glaetten (gleitender Mittelwert ueber 3 Knoten)
+  const sm = knotLag.slice();
+  for (let i = 0; i < sm.length; i++) {
+    let a = 0, cnt = 0;
+    for (let j = -1; j <= 1; j++) { const k = i + j; if (k >= 0 && k < knotLag.length) { a += knotLag[k]; cnt++; } }
+    sm[i] = a / cnt;
+  }
+  const period = new Float32Array(L);
+  if (knotX.length === 1) { period.fill(sm[0]); return period; }
+  let ki = 0;
+  for (let i = 0; i < L; i++) {
+    while (ki < knotX.length - 2 && knotX[ki + 1] <= i) ki++;
+    if (i <= knotX[0]) period[i] = sm[0];
+    else if (i >= knotX[knotX.length - 1]) period[i] = sm[sm.length - 1];
+    else {
+      const x0 = knotX[ki], x1 = knotX[ki + 1];
+      const f = x1 > x0 ? (i - x0) / (x1 - x0) : 0;
+      period[i] = sm[ki] + (sm[ki + 1] - sm[ki]) * f;
+    }
+  }
+  return period;
+}
+
+// Dynamische Programmierung (Ellis): beste Beat-Folge bei lokal erwarteter Periode.
+function dpBeats(local, period, tightness) {
+  const L = local.length;
+  const cum = new Float64Array(L);
+  const back = new Int32Array(L); back.fill(-1);
+  for (let i = 0; i < L; i++) {
+    const P = period[i] > 1 ? period[i] : 1;
+    const lo = Math.max(1, Math.round(P * 0.5));
+    const hi = Math.round(P * 2.0);
+    let bestScore = -Infinity, bestJ = -1;
+    const jStart = i - hi, jEnd = i - lo;
+    for (let j = jStart; j <= jEnd; j++) {
+      if (j < 0) continue;
+      const r = Math.log((i - j) / P);
+      const sc = cum[j] - tightness * r * r;
+      if (sc > bestScore) { bestScore = sc; bestJ = j; }
+    }
+    if (bestJ < 0) { cum[i] = local[i]; back[i] = -1; }
+    else { cum[i] = local[i] + bestScore; back[i] = bestJ; }
+  }
+  const Plast = period[L - 1] > 1 ? period[L - 1] : 1;
+  const tailStart = Math.max(0, L - Math.round(Plast));
+  let bestEnd = -1, bestVal = -Infinity;
+  for (let i = tailStart; i < L; i++) { if (cum[i] > bestVal) { bestVal = cum[i]; bestEnd = i; } }
+  if (bestEnd < 0) return [];
+  const beats = [];
+  let i = bestEnd;
+  while (i >= 0) { beats.push(i); i = back[i]; }
+  beats.reverse();
+  return beats;
+}
+
+// Beats auf die naechste Onset-Spitze ziehen und sub-Frame-genau interpolieren
+// (parabolisch). Das reduziert die Frame-Quantisierung (~11 ms) deutlich und
+// verbessert sowohl die Konstanterkennung als auch die absolute Synchronitaet.
+function refineBeats(beats, onset) {
+  const L = onset.length, r = 2;
+  for (let n = 0; n < beats.length; n++) {
+    const b = beats[n] | 0;
+    let bestI = b, bestV = (b >= 0 && b < L) ? onset[b] : -Infinity;
+    for (let j = -r; j <= r; j++) { const k = b + j; if (k >= 0 && k < L && onset[k] > bestV) { bestV = onset[k]; bestI = k; } }
+    let frac = 0;
+    if (bestI > 0 && bestI < L - 1) {
+      const y0 = onset[bestI - 1], y1 = onset[bestI], y2 = onset[bestI + 1];
+      const den = (y0 - 2 * y1 + y2);
+      if (den !== 0) { const d = 0.5 * (y0 - y2) / den; if (d > -1 && d < 1) frac = d; }
+    }
+    beats[n] = bestI + frac;
+  }
+}
+
+function sanitizeBeats(beats) {
+  const out = [];
+  for (let i = 0; i < beats.length; i++) {
+    const t = beats[i];
+    if (!isFinite(t)) continue;
+    if (out.length === 0 || t > out[out.length - 1] + 1e-4) out.push(t);
+  }
+  return Float64Array.from(out);
+}
+
+// Geradenfit t ~ a + b*k (k = Beat-Index) per kleinster Quadrate.
+function lineFit(beats) {
+  const n = beats.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let k = 0; k < n; k++) { const y = beats[k]; sx += k; sy += y; sxx += k * k; sxy += k * y; }
+  const den = n * sxx - sx * sx;
+  const b = den !== 0 ? (n * sxy - sx * sy) / den : 0;
+  const a = (sy - b * sx) / n;
+  return { a, b };
+}
+
+// 24 PPQN. Wichtig: 24 Ticks gelten PRO Viertel. Ist ein Beat-Abstand ~doppelt
+// so lang wie seine Nachbarn (vom Tracker uebersprungener Beat), bekommt er
+// 48 Ticks (mult=2) -> die Clock-Geschwindigkeit bleibt durchgehend korrekt und
+// phasenrichtig statt kurz auf Halbtempo zu fallen. Ueber den letzten Beat hinaus
+// wird mit dem letzten Intervall bis Dateiende verlaengert.
+function buildTickTimes(beats, duration) {
+  const M = beats.length;
+  if (M < 2) return new Float64Array(0);
+  const ibi = [];
+  for (let k = 1; k < M; k++) ibi.push(beats[k] - beats[k - 1]);
+  const localMed = (k) => {
+    const w = [];
+    for (let j = Math.max(0, k - 2); j <= Math.min(ibi.length - 1, k + 2); j++) w.push(ibi[j]);
+    w.sort((a, b) => a - b);
+    return w[w.length >> 1];
+  };
+  const ticks = [];
+  for (let k = 0; k < M - 1; k++) {
+    const t0 = beats[k], d = beats[k + 1] - beats[k];
+    const med = localMed(k) || d;
+    let mult = Math.round(d / med); if (mult < 1) mult = 1; if (mult > 4) mult = 4;
+    const sub = PPQN * mult;
+    for (let j = 0; j < sub; j++) ticks.push(t0 + d * (j / sub));
+  }
+  const lastIvl = beats[M - 1] - beats[M - 2];
+  if (lastIvl > 0) {
+    let t = beats[M - 1];
+    while (t <= duration + 1e-6) {
+      for (let j = 0; j < PPQN; j++) { const tt = t + lastIvl * (j / PPQN); if (tt <= duration + 1e-6) ticks.push(tt); }
+      t += lastIvl;
+    }
+  } else {
+    ticks.push(beats[M - 1]);
+  }
+  return Float64Array.from(ticks);
+}
+
+// Momentantempo an Position pos (s) aus dem Beat-Raster.
+function fileBpmAt(pos) {
+  const b = fileBeatTimes;
+  if (!b || b.length < 2) return fileTempoInfo ? fileTempoInfo.bpm : 0;
+  if (pos <= b[0]) { const d = b[1] - b[0]; return d > 0 ? 60 / d : 0; }
+  if (pos >= b[b.length - 1]) { const d = b[b.length - 1] - b[b.length - 2]; return d > 0 ? 60 / d : 0; }
+  let lo = 0, hi = b.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (b[mid] <= pos) lo = mid; else hi = mid; }
+  const d = b[lo + 1] - b[lo];
+  return d > 0 ? 60 / d : 0;
+}
+
+function fmtTime(s) {
+  s = Math.max(0, s);
+  const m = Math.floor(s / 60), ss = Math.floor(s % 60);
+  return m + ':' + (ss < 10 ? '0' : '') + ss;
+}
+
+// --- Wiedergabe + driftfreier Scheduler ---
+async function startFile() {
+  if (fileAnalyzing) { setHint('Bitte die Analyse abwarten …'); return; }
+  if (!fileBuffer || !fileTickTimes || !fileTickTimes.length) { setHint('Bitte zuerst eine Audiodatei wählen.', true); return; }
+  if (!audioCtx) { setHint('Audio-Kontext fehlt – Datei bitte neu laden.', true); return; }
+  clock.disable();                       // sicherstellen: keine Live-Clock parallel
+  try { await audioCtx.resume(); } catch (e) {}
+  try {
+    fileSource = audioCtx.createBufferSource();
+    fileSource.buffer = fileBuffer;
+    fileAnalyser = audioCtx.createAnalyser();
+    fileAnalyser.fftSize = 1024;
+    fileTimeBuf = new Float32Array(fileAnalyser.fftSize);
+    fileSource.connect(fileAnalyser);
+    fileSource.connect(audioCtx.destination);   // hoerbar
+  } catch (e) {
+    setHint('Wiedergabe-Setup fehlgeschlagen: ' + e.message, true);
+    if (fileSource) { try { fileSource.disconnect(); } catch (_) {} fileSource = null; }
+    return;
+  }
+  fileNextTickIdx = 0; fileStartSent = false; levelEma = 0;
+  const t0 = audioCtx.currentTime + FILE_LEAD_S;
+  fileStartCtxTime = t0;
+  fileSource.onended = () => { if (running) finishFile(); };
+  try { fileSource.start(t0); } catch (e) { setHint('Start fehlgeschlagen: ' + e.message, true); return; }
+  running = true;
+  fileSchedTimer = setInterval(fileScheduleTick, FILE_SCHED_INTERVAL_MS);
+  elStart.textContent = 'Stopp'; elStart.classList.add('stop');
+  setControlsDisabled(true);
+  if (elFileBtn) elFileBtn.disabled = true;
+  elMidi.disabled = true;
+  setStatus('spielt …');
+  setHint('Spielt driftfrei. Die MIDI-Clock ist an die Wiedergabe gekoppelt. Tab im Vordergrund lassen.');
+}
+
+function fileScheduleTick() {
+  if (!running || !fileSource || !fileTickTimes) return;
+  let ctxNow, perfNow;
+  const ots = (audioCtx && audioCtx.getOutputTimestamp) ? audioCtx.getOutputTimestamp() : null;
+  if (ots && typeof ots.contextTime === 'number' && typeof ots.performanceTime === 'number' && ots.contextTime > 0) {
+    ctxNow = ots.contextTime; perfNow = ots.performanceTime;
+  } else {
+    ctxNow = audioCtx ? audioCtx.currentTime : 0; perfNow = performance.now();
+  }
+  const pos = ctxNow - fileStartCtxTime;               // hoerbare Wiedergabeposition (s)
+  const horizon = pos + FILE_SCHED_LOOKAHEAD_S;
+  const sendSS = elStartStop.checked;
+  while (fileNextTickIdx < fileTickTimes.length && fileTickTimes[fileNextTickIdx] < horizon) {
+    const tSec = fileTickTimes[fileNextTickIdx];
+    const tcTarget = fileStartCtxTime + tSec;          // Ziel in Audio-Kontextzeit
+    let perfTarget = perfNow + (tcTarget - ctxNow) * 1000;   // -> performance.now()-Domaene
+    if (perfTarget < perfNow) perfTarget = perfNow;
+    if (!fileStartSent) {
+      fileStartSent = true;
+      if (sendSS && midiOut) { try { midiOut.send([MSG_START], Math.max(perfNow, perfTarget - 1)); } catch (e) {} }
+    }
+    if (midiOut) { try { midiOut.send([MSG_CLOCK], perfTarget); } catch (e) {} }
+    fileNextTickIdx++;
+  }
+}
+
+function renderFile() {
+  if (fileAnalyser && fileTimeBuf) {
+    fileAnalyser.getFloatTimeDomainData(fileTimeBuf);
+    let s = 0; for (let i = 0; i < fileTimeBuf.length; i++) s += fileTimeBuf[i] * fileTimeBuf[i];
+    const rms = Math.sqrt(s / fileTimeBuf.length);
+    levelEma = 0.8 * levelEma + 0.2 * rms;
+    updateLevel(levelEma > 0 ? 20 * Math.log10(levelEma) : -120);
+  }
+  const ctxNow = audioCtx ? audioCtx.currentTime : 0;
+  const pos = ctxNow - fileStartCtxTime;
+  const dur = fileBuffer ? fileBuffer.duration : 0;
+  const bpm = fileBpmAt(pos);
+  setBpmText(bpm ? String(Math.round(bpm)) : '—');
+  elRaw.textContent = dur ? (fmtTime(pos) + ' / ' + fmtTime(dur)) : '';
+  if (fileTempoInfo && fileTempoInfo.constant) setStatus('spielt · konstantes Tempo · driftfrei');
+  else setStatus('spielt · variables Tempo · driftfrei');
+}
+
+function teardownFilePlayback(sendStop) {
+  if (fileSchedTimer) { clearInterval(fileSchedTimer); fileSchedTimer = null; }
+  if (sendStop && fileStartSent && elStartStop.checked && midiOut) { try { midiOut.send([MSG_STOP]); } catch (e) {} }
+  if (fileSource) { try { fileSource.onended = null; fileSource.stop(); } catch (e) {} try { fileSource.disconnect(); } catch (e) {} fileSource = null; }
+  if (fileAnalyser) { try { fileAnalyser.disconnect(); } catch (e) {} fileAnalyser = null; }
+  fileTimeBuf = null;
+  running = false; fileStartSent = false;
+  elStart.textContent = 'Abspielen & senden'; elStart.classList.remove('stop');
+  setControlsDisabled(false);
+  if (elFileBtn) elFileBtn.disabled = false;
+  elMidi.disabled = false;
+  updateLevel(-60);
+  applyModeControls();
+}
+
+function stopFile() {
+  teardownFilePlayback(true);
+  setBpmText(fileTempoInfo ? String(Math.round(fileTempoInfo.bpm)) : '—');
+  if (fileTempoInfo) {
+    if (fileTempoInfo.constant) setStatus('bereit · konstantes Tempo ≈ ' + fileTempoInfo.bpm.toFixed(1) + ' BPM · perfektes Raster');
+    else setStatus('bereit · variables Tempo ' + Math.round(fileTempoInfo.bpmMin) + '–' + Math.round(fileTempoInfo.bpmMax) + ' BPM');
+  } else setStatus('bereit');
+  setHint('Gestoppt. „Abspielen & senden" für erneuten Start.');
+}
+
+function finishFile() {
+  teardownFilePlayback(true);
+  setBpmText(fileTempoInfo ? String(Math.round(fileTempoInfo.bpm)) : '—');
+  setStatus('fertig');
+  if (fileBuffer) elRaw.textContent = fmtTime(fileBuffer.duration) + ' / ' + fmtTime(fileBuffer.duration);
+  setHint('Wiedergabe beendet. „Abspielen & senden" für erneuten Start.');
+}
+
+// Datei-Modus vollstaendig zuruecksetzen (Kontext schliessen, Zustand leeren).
+function resetFileMode() {
+  if (fileSchedTimer) { clearInterval(fileSchedTimer); fileSchedTimer = null; }
+  if (fileSource) { try { fileSource.onended = null; fileSource.stop(); } catch (e) {} try { fileSource.disconnect(); } catch (e) {} fileSource = null; }
+  if (fileAnalyser) { try { fileAnalyser.disconnect(); } catch (e) {} fileAnalyser = null; }
+  fileTimeBuf = null;
+  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+  fileBuffer = null; fileBeatTimes = null; fileTickTimes = null; fileTempoInfo = null;
+  fileNextTickIdx = 0; fileStartSent = false;
+  if (running && opMode === 'file') running = false;
+  if (elFileNameLbl) elFileNameLbl.textContent = 'keine Datei';
 }
 
 // --- Audio-Bloecke + Analyse ---
@@ -1247,11 +1831,12 @@ function analyze() {
     haveEstimate = true;
     const med = median(estimates);
     clock.setTargetBpm(med);
-    // Beat-Phase melden -> die Clock rastet aufs Song-Raster ein (gegen Drift).
-    const offSec = analyzer.beatPhase(med);
-    if (offSec != null) {
-      clock.setBeat(lastChunkTime - offSec * 1000, 60000 / med);
-    }
+    // Beat-Phasenkopplung (Einrasten aufs Song-Raster) DEAKTIVIERT: brachte
+    // keine zuverlaessige Drift-Reduktion und ist die Komplexitaet nicht wert.
+    // Die Clock laeuft jetzt einfach im geglaetteten Median-Tempo
+    // (siehe MidiClock._schedule; ohne Beat-Anker greift die PLL nicht mehr).
+    // Falls die Phasenkopplung spaeter doch gewuenscht ist, hier wieder
+    // analyzer.beatPhase(med) ermitteln und clock.setBeat(...) aufrufen.
   }
   // Tonart-Chroma (grosse FFT) nur rechnen, wenn die Anzeige aktiv ist -- spart
   // spuerbar Rechenzeit (v. a. auf dem Handy), wenn die Tonart nicht gebraucht wird.
@@ -1310,7 +1895,9 @@ function updateKeyDisplay() {
 
 // --- Anzeige ---
 function render() {
-  if (running) {
+  if (running && opMode === 'file') {
+    renderFile();
+  } else if (running) {
     const db = levelEma > 0 ? 20 * Math.log10(levelEma) : -120;
     updateLevel(db);
     if (opMode !== 'clock') {
@@ -1332,7 +1919,7 @@ function render() {
       elRaw.textContent = 'roh: ' + (lastRaw ? lastRaw.toFixed(1) : '—');
     }
   }
-  if (keyEnabled) updateKeyDisplay();
+  if (keyEnabled && opMode !== 'file') updateKeyDisplay();
   requestAnimationFrame(render);
 }
 
@@ -1379,6 +1966,19 @@ elKeyToggle.addEventListener('click', () => {
   elKeyToggle.classList.toggle('on', keyEnabled);
   if (keyEnabled) updateKeyDisplay();
 });
+
+// Datei-Modus: Datei waehlen + bei BPM-Bereichsaenderung neu analysieren
+elFileBtn.addEventListener('click', () => elAudioFile.click());
+elAudioFile.addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';                 // gleiche Datei erneut waehlbar machen
+  if (f) loadFile(f);
+});
+function maybeReanalyze() {
+  if (opMode === 'file' && fileBuffer && !running && !fileAnalyzing) analyzeLoadedFile();
+}
+elMin.addEventListener('change', maybeReanalyze);
+elMax.addEventListener('change', maybeReanalyze);
 
 window.addEventListener('DOMContentLoaded', () => {
   elMidi.add(new Option('Kein MIDI (Liste öffnen zum Verbinden)', ''));

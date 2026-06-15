@@ -2,11 +2,12 @@
 
 Eine schlanke Browser-Variante des Projekts: Tempo-Erkennung (BPM) mit
 **stabiler MIDI-Clock-Ausgabe** (24 PPQN), optional auch die **Grundtonart**
-(mit Paralleltonart). Ein **Noten-Modus** sendet erkannte Tonhöhen direkt als
-MIDI-Noten (mono- oder polyphon). Als Quelle dient ein Audio-Eingang **oder**
-die **mitgehörte Wiedergabe** (Tab-/System-Audio). Keine Installation, kein
-Python, kein Server -- die ganze App steckt in einer einzigen Datei:
-**`index.html`**.
+(mit Paralleltonart). Ein **Datei-Modus** taktet eine geladene Audiodatei
+**driftfrei** zur Wiedergabe (Offline-Beat-Map), ein **Noten-Modus** sendet
+erkannte Tonhöhen direkt als MIDI-Noten (mono- oder polyphon). Als Quelle
+dient ein Audio-Eingang **oder** die **mitgehörte Wiedergabe**
+(Tab-/System-Audio). Keine Installation, kein Python, kein Server -- die ganze
+App steckt in einer einzigen Datei: **`index.html`**.
 
 > **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
 
@@ -32,6 +33,45 @@ Dann:
 Die große Zahl zeigt das erkannte Tempo; die MIDI-Clock startet automatisch
 mit der ersten stabilen Schätzung (MIDI `start`) und hält bei Stille an
 (`stop`).
+
+Über **„Modus"** stehen vier Betriebsarten zur Wahl: „Tempo & MIDI-Clock"
+(live, oben beschrieben), „Datei → MIDI-Clock (driftfrei)" (siehe unten) sowie
+die beiden Noten-Modi (monophon/polyphon).
+
+## Datei → MIDI-Clock (driftfrei)
+
+Statt live mitzuhören lässt sich eine **Audiodatei laden** und ihre MIDI-Clock
+**driftfrei** zur Wiedergabe ausgeben – ideal, wenn man zu einem fertigen Track
+einen Drumcomputer/Sequenzer/Arpeggiator dauerhaft synchron laufen lassen will.
+
+So geht's: Modus auf **„Datei → MIDI-Clock (driftfrei)"** stellen, mit
+**„Datei wählen…"** eine Audiodatei laden, MIDI-Ausgang wählen und
+**„Abspielen & senden"** drücken. Die Datei wird hörbar abgespielt; Pegel,
+Position und Momentantempo werden angezeigt.
+
+- **Einmalige Offline-Analyse:** Die Datei wird dekodiert und **vorab** zu
+  einer Beat-Map analysiert (Onset-Hüllkurve → globales Tempo → lokale
+  Tempokurve → DP-Beat-Tracking), mit Fortschrittsanzeige. Das passiert nur
+  einmal beim Laden, nicht während der Wiedergabe.
+- **Driftfreie Clock:** Jeder 24-PPQN-Tick wird gegen die laufende Web-Audio-
+  Wiedergabe terminiert (Audio-Kontextzeit → `performance.now()` per
+  `getOutputTimestamp()`, als MIDI-Zeitstempel ausgegeben). Es gibt **keine
+  zweite, unabhängige Uhr** mehr, deren Fehler sich aufsummieren könnte – die
+  Clock bleibt dauerhaft am Song.
+- **Konstant vs. variabel – automatisch:** Konstantes Tempo (≤1,5 % Streuung)
+  ergibt ein mathematisch perfektes Raster; bei variablem Tempo folgt die Clock
+  den gemessenen Beat-Abständen. Der Status zeigt an, welcher Fall erkannt wurde.
+- **Robust:** Sub-Frame-genaue Beat-Verfeinerung, oktav-fester Tempo-Prior
+  (kein Halb-/Doppeltempo-Fehler), „24 Ticks pro Viertel" überbrücken einen
+  übersprungenen Beat (kein kurzes Halbtempo), robuste Tempo-Anzeige.
+- **MIDI optional:** Vorhören geht auch ohne MIDI-Ausgang. „MIDI Start/Stop ·
+  senden" setzt – wenn aktiv – den `start` auf den ersten Beat (und `stop` am
+  Ende). Der **BPM-Bereich** steuert die Analyse; ändert man ihn, wird die
+  geladene Datei automatisch neu analysiert.
+
+Im Datei-Modus werden Quelle, Audio-Eingang und Tonart ausgeblendet (sie sind
+hier ohne Funktion). **Grenze:** groove-genau, nicht sample-genau – es bleibt
+die übliche MIDI-Quantisierung von rund 1 ms. Den Tab im Vordergrund lassen.
 
 ## Noten-Modus (Pitch → MIDI)
 
@@ -154,7 +194,10 @@ hochaufgelösten) STFT statt der CQT des Python-Projekts.
   nur unter Windows** (Chrome/Edge). Unter macOS nur Tab-Audio.
 - **Vereinfachte Analyse:** Spektralfluss-Onset-Hüllkurve statt HPSS; Tonart
   aus STFT-Chroma statt CQT (etwas weniger treffsicher, vor allem bei der
-  Dur/Moll-Unterscheidung). Keine Akkorde, kein Beat-Sync.
+  Dur/Moll-Unterscheidung). Eine separate Akkord-/HMM-Analyse wie im
+  Python-Kern gibt es nicht; im Noten-Modus (polyphon) wird aus den erkannten
+  Tönen lediglich ein Akkordname abgeleitet. Beat-Sync gibt es live als
+  Phasenkopplung der Clock und im Datei-Modus als volle Offline-Beat-Map.
 
 ## Veröffentlichung über GitHub Pages
 
