@@ -38,16 +38,48 @@ mit der ersten stabilen Schätzung (MIDI `start`) und hält bei Stille an
 (live, oben beschrieben), „Datei → MIDI-Clock (driftfrei)" (siehe unten) sowie
 die beiden Noten-Modi (monophon/polyphon).
 
-## Datei → MIDI-Clock (driftfrei)
+## Datei/Aufnahme → MIDI-Clock (driftfrei)
 
 Statt live mitzuhören lässt sich eine **Audiodatei laden** und ihre MIDI-Clock
 **driftfrei** zur Wiedergabe ausgeben – ideal, wenn man zu einem fertigen Track
 einen Drumcomputer/Sequenzer/Arpeggiator dauerhaft synchron laufen lassen will.
 
-So geht's: Modus auf **„Datei → MIDI-Clock (driftfrei)"** stellen, mit
-**„Datei wählen…"** eine Audiodatei laden, MIDI-Ausgang wählen und
-**„Abspielen & senden"** drücken. Die Datei wird hörbar abgespielt; Pegel,
-Position und Momentantempo werden angezeigt.
+So geht's: Modus auf **„Datei/Aufnahme → MIDI-Clock (driftfrei)"** stellen, mit
+**„Datei wählen…"** eine Audiodatei laden (oder per **„Aufnehmen"** mitschneiden,
+siehe unten), MIDI-Ausgang wählen und **„Abspielen & senden"** drücken. Das Audio
+wird hörbar abgespielt; Pegel, Position und Momentantempo werden angezeigt.
+
+**Aufnehmen statt laden:** Audio lässt sich auch direkt aufnehmen und dann wie
+eine Datei analysieren – so bekommt man auch ohne Datei (z. B. von einem Stream)
+eine stabile Clock. Ablauf:
+
+1. **Quelle wählen** (oben „Quelle"): **„Wiedergabe mithören"** (Tab/System)
+   **oder** **„Audio-Eingang"** (Mikrofon/Line-In – Gerät über „Eingänge laden"
+   wählen).
+2. **„Quelle bereitstellen"** – bei „Mithören" erscheint **vor** der Aufnahme
+   der Freigabe-Dialog, in dem Inhalt/Tab gewählt wird („Systemaudio/Tab-Audio
+   teilen" ankreuzen).
+3. **„● Start"** / **„■ Stopp"** – Aufnahme manuell starten und beenden. Danach
+   wird sie automatisch analysiert (Beat-Map) und ist abspielbar.
+
+Schon **ab „Quelle bereitstellen"** und während der Aufnahme laufen **Pegel,
+BPM und Tonart** live mit (dieselbe Analyse wie im Clock-Modus, nur ohne MIDI) –
+so sieht man sofort, ob Audio ankommt und was erkannt wird.
+
+**Speichern (mit Namensvorschlag):** Nach der Aufnahme öffnet **„Speichern…"**
+ein Panel. Die Aufnahme wird automatisch in **Stücke** zerlegt (Indiz: kurze
+Stille + BPM/Tonart-Wechsel); jedes Stück erscheint mit Zeit, BPM und Tonart und
+einem **frei editierbaren Dateinamen** – vorbelegt aus **BPM + Tonart** (z. B.
+`120BPM_C_Dur`). Unsichere Grenzen sind gedimmt markiert. Du kannst jedes Stück
+einzeln oder **„Alle speichern"**, alles **„Als ein Stück"** zusammenfassen oder
+**„Nach Zeit trennen…"** (feste Minuten-Abstände). Format **WAV** (auch je Stück)
+oder **WebM-Original** (klein, aber nur die **ganze** Aufnahme, da komprimierte
+Streams nicht verlustfrei geschnitten werden können). Der Speichern-Dialog
+erlaubt freie Namens-/Ortswahl (Chrome/Edge).
+
+Aufnahme/Mithören gibt es nur, wo der Browser es unterstützt
+(Windows/Chrome/Edge mit Systemaudio, sonst Tab-Audio bzw. Audio-Eingang); auf
+Android/Mobil ist die Aufnahme deaktiviert.
 
 - **Einmalige Offline-Analyse:** Die Datei wird dekodiert und **vorab** zu
   einer Beat-Map analysiert (Onset-Hüllkurve → globales Tempo → lokale

@@ -60,6 +60,7 @@ button.ghost {
 button.ghost:hover { background: var(--surface-hi); }
 button.ghost:disabled { opacity: .5; cursor: default; }
 button.ghost.on { border-color: var(--accent); color: var(--accent); }
+button.ghost.rec { border-color: #e0564e; color: #e0564e; }   /* Aufnahme laeuft */
 select, input[type="number"] {
   background: var(--surface); color: var(--fg); border: 1px solid var(--surface-hi);
   border-radius: 6px; padding: 8px 10px; font-size: 14px;
@@ -113,6 +114,19 @@ main {
 .calib .note { flex-basis: 100%; font-size: 12px; color: var(--muted); margin: 0; }
 .calib .actions { display: flex; align-items: flex-end; }
 
+/* Speichern/Prüf-Panel (Aufnahme als Datei[en]) */
+.savep { padding: 12px 24px; border-bottom: 1px solid var(--surface); background: #1a1916; display: flex; flex-direction: column; gap: 10px; }
+.savep .saverow { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.savep .slbl { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.savep .seg { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--surface); }
+.savep .seg.unsure { opacity: .7; }
+.savep .seg .ix { font-size: 12px; color: var(--muted); width: 1.6em; text-align: right; }
+.savep .seg .meta { font-size: 13px; color: var(--fg); font-variant-numeric: tabular-nums; min-width: 230px; }
+.savep .seg .meta .q { color: var(--warn); }
+.savep .seg input[type="text"] { flex: 1; min-width: 150px; background: var(--surface); color: var(--fg); border: 1px solid var(--surface-hi); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.savep .saveactions { display: flex; gap: 10px; flex-wrap: wrap; }
+.savep .note { font-size: 12px; color: var(--muted); margin: 0; }
+
 /* Kompaktere Darstellung auf schmalen Bildschirmen (Handy) */
 @media (max-width: 600px) {
   header { flex-direction: column; align-items: flex-start; gap: 1px; padding: 8px 14px; }
@@ -150,7 +164,7 @@ main {
       <label for="opMode">Modus</label>
       <select id="opMode">
         <option value="clock">Tempo &amp; MIDI-Clock</option>
-        <option value="file">Datei → MIDI-Clock (driftfrei)</option>
+        <option value="file">Datei/Aufnahme → MIDI-Clock (driftfrei)</option>
         <option value="mono">Noten → MIDI (monophon)</option>
         <option value="poly">Noten → MIDI (polyphon)</option>
         <option value="chord">Noten → MIDI (Akkorde)</option>
@@ -174,12 +188,21 @@ main {
       </div>
     </div>
     <div class="field" id="fileField" style="display:none">
-      <label for="audioFile">Audiodatei</label>
+      <label for="audioFile">Audio (Datei oder Aufnahme)</label>
       <div class="row">
         <button id="fileBtn" class="ghost">Datei wählen…</button>
         <span id="fileNameLbl" class="filelbl">keine Datei</span>
       </div>
       <input type="file" id="audioFile" accept="audio/*" style="display:none">
+    </div>
+    <div class="field" id="recField" style="display:none">
+      <label>Aufnahme</label>
+      <div class="row">
+        <button id="recArm" class="ghost"
+                title="Aufnahme-Quelle bereitstellen (Tab/System oder Eingang) – vor der Aufnahme">Quelle bereitstellen</button>
+        <button id="recToggle" class="ghost" disabled title="Aufnahme manuell starten/stoppen">● Start</button>
+        <button id="recSave" class="ghost" disabled title="Aufnahme als Datei(en) speichern">Speichern…</button>
+      </div>
     </div>
     <div class="field">
       <label for="midiOut">MIDI-Ausgang</label>
@@ -246,6 +269,22 @@ main {
       <button id="calibReset" class="ghost">Zurücksetzen</button>
     </div>
     <p class="note" id="calibNote"></p>
+  </section>
+
+  <section class="savep" id="savePanel" style="display:none">
+    <div class="saverow">
+      <span class="slbl">Format</span>
+      <label class="chk"><input type="radio" name="savefmt" id="fmtWav" value="wav" checked> WAV (unkomprimiert)</label>
+      <label class="chk"><input type="radio" name="savefmt" id="fmtWebm" value="webm"> WebM-Original (nur ganze Aufnahme)</label>
+    </div>
+    <div id="segList"></div>
+    <div class="saveactions">
+      <button id="saveAll" class="ghost on">Alle speichern</button>
+      <button id="mergeAll" class="ghost">Als ein Stück</button>
+      <button id="splitTime" class="ghost">Nach Zeit trennen…</button>
+      <button id="saveClose" class="ghost">Schließen</button>
+    </div>
+    <p class="note" id="saveNote"></p>
   </section>
 
   <main>
@@ -318,6 +357,8 @@ const FILE_SCHED_LOOKAHEAD_S = 0.12;   // so weit im Voraus werden Ticks termini
 const FILE_CONST_DRIFT       = 0.015;  // <=1,5% Tempo-Unterschied 1./2. Haelfte -> "konstant" -> perfektes Raster
 const FILE_FOLD_REL          = 0.006;  // Feinsuche der Periode: +-0,6% um den Median-Beat-Abstand
 const FILE_FOLD_MIN_R        = 0.45;   // ab dieser Phasenkohaerenz wird die verfeinerte Periode genutzt
+const SONG_GAP_S             = 1.2;    // Stille-Laenge (s), ab der eine Stueck-Grenze vermutet wird
+const SONG_MIN_S             = 15;     // kuerzere Segmente werden zum Nachbarn gemerged
 
 // Noten-Modus (Pitch -> MIDI)
 const NOTE_CH          = 0;       // MIDI-Kanal 1
@@ -1135,6 +1176,17 @@ let fileNextTickIdx = 0;       // naechster zu sendender Tick
 let fileStartSent = false;     // MIDI-Start schon gesendet?
 let fileAnalyzing = false;     // laeuft die Offline-Analyse?
 
+// Aufnahme-Modus (Quelle bereitstellen -> aufnehmen -> wie eine Datei analysieren)
+let recArmedStream = null;     // bereitgestellte Quelle (Loopback ODER Audio-Eingang)
+let recRecorder = null;        // MediaRecorder
+let recChunks = [];            // aufgenommene Blob-Teile
+let recTimer = null;           // Intervall fuer die Laufzeitanzeige
+let recStartMs = 0;            // Startzeit (performance.now)
+let recording = false;         // laeuft gerade eine Aufnahme?
+let recBlob = null;            // fertige Aufnahme (Original, fuer WebM-Speichern)
+let recSegments = [];          // erkannte Stuecke fuer das Speichern-Panel
+let recMonitoring = false;     // Live-Analyse (Pegel/BPM/Tonart) waehrend Bereitstellen+Aufnahme
+
 // Tonart-Zustand (zweistufige Mittelung + Hysterese wie im Python-Kern)
 let keyEnabled = false;
 let keyDisp = '—', keyPend = null, keyPendN = 0, keyConfident = false;
@@ -1154,6 +1206,9 @@ const elStartStop = $('startStop');
 const elOctave = $('octave');
 const elSrcField = $('srcField'), elInField = $('inField'), elKeyField = $('keyField'), elOctField = $('octField');
 const elFileField = $('fileField'), elFileBtn = $('fileBtn'), elFileNameLbl = $('fileNameLbl'), elAudioFile = $('audioFile');
+const elRecField = $('recField'), elRecArm = $('recArm'), elRecToggle = $('recToggle'), elRecSave = $('recSave');
+const elSavePanel = $('savePanel'), elSegList = $('segList'), elFmtWav = $('fmtWav'), elFmtWebm = $('fmtWebm');
+const elSaveAll = $('saveAll'), elMergeAll = $('mergeAll'), elSplitTime = $('splitTime'), elSaveClose = $('saveClose'), elSaveNote = $('saveNote');
 const elCalibField = $('calibField'), elCalibToggle = $('calibToggle'), elCalibPanel = $('calibPanel');
 const elCalibReset = $('calibReset'), elCalibNote = $('calibNote');
 const cLat = $('cLatency'), cLatV = $('cLatencyV'), cSil = $('cSilence'), cSilV = $('cSilenceV');
@@ -1276,8 +1331,9 @@ function applyModeControls() {
   elKeyToggle.disabled = note || file; // Tonart nur im Clock-Modus
   elStartStop.disabled = note;         // Start/Stop fuer Clock + Datei relevant
   elOctave.disabled = !note;           // Oktav-Transponierung nur im Noten-Modus
-  elSource.disabled = file;
-  if (!file) { elInput.disabled = (elSource.value === 'display'); elLoad.disabled = (elSource.value === 'display'); }
+  elSource.disabled = false;           // Quelle: Clock/Noten = Live-Quelle, Datei = Aufnahme-Quelle
+  elInput.disabled = (elSource.value === 'display');
+  elLoad.disabled  = (elSource.value === 'display');
   if (elFileBtn) elFileBtn.disabled = !file;
 }
 function applyMode() {
@@ -1285,12 +1341,15 @@ function applyMode() {
   const note = (opMode === 'mono' || opMode === 'poly' || opMode === 'chord');
   const file = opMode === 'file';
   if (!file) resetFileMode();          // Datei-Audio freigeben, wenn der Modus verlassen wird
-  // Felder ein-/ausblenden
-  elSrcField.style.display  = file ? 'none' : '';
-  elInField.style.display   = file ? 'none' : '';
+  // Felder ein-/ausblenden. Quelle/Eingang sind im Datei-Modus jetzt die
+  // AUFNAHME-Quelle (Mithören oder Audio-Eingang) und bleiben sichtbar.
+  elSrcField.style.display  = '';
+  elInField.style.display   = '';
   elFileField.style.display = file ? '' : 'none';
+  elRecField.style.display  = file ? '' : 'none';
   elKeyField.style.display  = file ? 'none' : '';
   elOctField.style.display  = file ? 'none' : '';
+  if (!file) closeSavePanel();
   applyModeControls();
   elBpmCap.textContent = note ? (opMode === 'chord' ? 'AKKORD' : opMode === 'poly' ? 'NOTEN' : 'NOTE') : 'BPM';
   elBpm.classList.toggle('notes', note);
@@ -1301,9 +1360,14 @@ function applyMode() {
     elStart.textContent = 'Abspielen & senden';
     elStart.classList.remove('stop');
     elStart.disabled = !(fileBuffer && fileTickTimes && fileTickTimes.length);
+    elRecArm.disabled = !recAnySupported();
+    elRecArm.title = recAnySupported() ? 'Aufnahme-Quelle bereitstellen (Tab/System oder Eingang) – vor der Aufnahme'
+                                       : 'Aufnahme hier nicht verfügbar';
+    elRecToggle.disabled = !recArmedStream;
+    elRecSave.disabled = !(recBlob && fileBuffer);
     setStatus(fileBuffer ? (fileTempoInfo ? '' : 'bereit') : 'keine Datei');
-    setHint('Datei-Modus: Audiodatei wählen → sie wird offline analysiert (Beat-Map) → die MIDI-Clock '
-          + 'läuft danach driftfrei zur Wiedergabe. Tipp: BPM-Bereich grob passend setzen, dann Datei wählen.');
+    setHint('Datei wählen ODER aufnehmen: Quelle (Mithören/Audio-Eingang) wählen → „Quelle bereitstellen" '
+          + '→ „● Start"/„■ Stopp". Das Audio wird analysiert; danach „Abspielen & senden" oder „Speichern…".');
   } else {
     elStart.textContent = 'Start';
     elStart.disabled = false;
@@ -1559,20 +1623,23 @@ function fileMinBpm() { return clampBpm(parseFloat(elMin.value), DEFAULT_MIN_BPM
 function fileMaxBpm() { return clampBpm(parseFloat(elMax.value), DEFAULT_MAX_BPM); }
 
 async function loadFile(file) {
-  if (running) stop();
-  resetFileMode();                       // alten Kontext/Buffer freigeben
-  fileName = (file && file.name) ? file.name : 'Datei';
-  elFileNameLbl.textContent = fileName;
-  elStart.disabled = true;
-  setBpmText('—');
-  setStatus('lade Datei …');
-  setHint('Datei wird gelesen …');
   let arr;
   try { arr = await file.arrayBuffer(); }
   catch (e) { setHint('Datei konnte nicht gelesen werden: ' + e.message, true); setStatus('FEHLER'); return; }
+  await decodeAndAnalyze(arr, (file && file.name) ? file.name : 'Datei');
+}
+// Gemeinsamer Weg fuer Datei UND Aufnahme: Rohdaten dekodieren -> Beat-Map.
+async function decodeAndAnalyze(arr, name) {
+  if (running) stop();
+  resetFileMode();                       // alten Kontext/Buffer freigeben
+  fileName = name;
+  elFileNameLbl.textContent = name;
+  elStart.disabled = true;
+  setBpmText('—');
+  setStatus('dekodiere …');
+  setHint('Audio wird gelesen …');
   try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
   catch (e) { setHint('Audio-Kontext fehlgeschlagen: ' + e.message, true); setStatus('FEHLER'); return; }
-  setStatus('dekodiere …');
   await new Promise(r => setTimeout(r, 0));
   try {
     fileBuffer = await audioCtx.decodeAudioData(arr);
@@ -1581,6 +1648,349 @@ async function loadFile(file) {
     setStatus('FEHLER'); fileBuffer = null; return;
   }
   await analyzeLoadedFile();
+}
+
+// --- Aufnahme: Quelle bereitstellen -> manuell starten/stoppen ---
+// Aufnehmen geht via Mithören (getDisplayMedia) ODER normalem Audio-Eingang
+// (getUserMedia). Voraussetzung ist MediaRecorder + mindestens eine Quelle.
+function recAnySupported() {
+  return !!(window.MediaRecorder && navigator.mediaDevices &&
+    (navigator.mediaDevices.getDisplayMedia || navigator.mediaDevices.getUserMedia));
+}
+// Quelle (Tab/System ODER Audio-Eingang) bereitstellen -- VOR der Aufnahme, damit
+// Inhalt/Tab bereits gewaehlt ist. Danach wird manuell aufgenommen.
+async function armRecording() {
+  if (recording || running) return;
+  disarmRecording();
+  const mode = elSource.value;            // 'input' | 'display'
+  let stream;
+  try { stream = await acquireStream(mode); }
+  catch (e) { setHint((mode === 'display' ? 'Mithören' : 'Eingang') + ' bereitstellen fehlgeschlagen: ' + e.message, true); return; }
+  recArmedStream = stream;
+  if (mode === 'input') { captureGranted(stream); inputsUnlocked = true; refreshAudioInputs(); }
+  const at0 = stream.getAudioTracks()[0];
+  if (at0) at0.addEventListener('ended', () => { recording ? stopRecording() : disarmRecording(true); });
+  // alten Datei-/Aufnahme-Zustand verwerfen (ohne die neue Quelle zu stoppen)
+  fileBuffer = null; fileBeatTimes = null; fileTickTimes = null; fileTempoInfo = null;
+  recBlob = null; recSegments = []; elRecSave.disabled = true; closeSavePanel();
+  startRecMonitor(stream);                // Live-Pegel/BPM/Tonart schon beim Bereitstellen
+  elRecArm.classList.add('on'); elRecArm.textContent = 'Quelle bereit ✓';
+  elRecToggle.disabled = false;
+  setStatus('Quelle bereit – „● Start" zum Aufnehmen');
+  setHint(mode === 'display'
+    ? 'Quelle bereit (Mithören) – Inhalt/Tab ist gewählt. Pegel/BPM/Tonart laufen mit. „● Start" nimmt auf, „■ Stopp" beendet.'
+    : 'Quelle bereit (Audio-Eingang). Pegel/BPM/Tonart laufen mit. „● Start" nimmt auf, „■ Stopp" beendet.');
+}
+function disarmRecording(endedByBrowser) {
+  stopRecMonitor();
+  if (recArmedStream) { recArmedStream.getTracks().forEach(t => t.stop()); recArmedStream = null; }
+  elRecArm.classList.remove('on'); elRecArm.textContent = 'Quelle bereitstellen';
+  if (!recording) elRecToggle.disabled = true;
+  if (endedByBrowser) setHint('Quelle wurde beendet. „Quelle bereitstellen" für eine neue Aufnahme.');
+}
+// Live-Analyse auf der bereitgestellten Quelle (gleiche Kette wie der Clock-Modus,
+// aber ohne MIDI-Clock): Pegel + BPM + Tonart waehrend Bereitstellen UND Aufnahme.
+function startRecMonitor(stream) {
+  stopRecMonitor();
+  clock.disable();                        // sicher: kein MIDI waehrend der Aufnahme
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+  catch (e) { return; }
+  analyzer = new TempoAnalyzer(audioCtx.sampleRate, fileMinBpm(), fileMaxBpm());
+  estimates = []; lastRaw = 0; levelEma = 0; haveEstimate = false; resetKey();
+  try {
+    procSrc = audioCtx.createMediaStreamSource(stream);
+    procNode = audioCtx.createScriptProcessor(2048, 1, 1);
+    procNode.onaudioprocess = processAudioEvent;   // opMode==='file' -> onChunk -> analyzer
+    procSrc.connect(procNode);
+    sinkNode = audioCtx.createGain(); sinkNode.gain.value = 0;
+    procNode.connect(sinkNode); sinkNode.connect(audioCtx.destination);
+  } catch (e) { stopRecMonitor(); return; }
+  if (analyzeTimer) clearInterval(analyzeTimer);
+  analyzeTimer = setInterval(analyze, ANALYSIS_INTERVAL * 1000);
+  recMonitoring = true; lastChunkTime = performance.now();
+}
+function stopRecMonitor() {
+  recMonitoring = false;
+  if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null; }
+  if (procNode) { try { procNode.disconnect(); } catch (e) {} procNode.onaudioprocess = null; procNode = null; }
+  if (procSrc) { try { procSrc.disconnect(); } catch (e) {} procSrc = null; }
+  if (sinkNode) { try { sinkNode.disconnect(); } catch (e) {} sinkNode = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+  analyzer = null;
+  elKeyBlock.style.display = 'none';
+}
+function startRecording() {
+  if (recording || !recArmedStream) return;
+  const audioOnly = new MediaStream(recArmedStream.getAudioTracks());
+  if (!audioOnly.getAudioTracks().length) { setHint('Kein Audio in der Quelle. Beim Teilen „Systemaudio/Tab-Audio" ankreuzen bzw. Eingang prüfen.', true); return; }
+  const cand = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+  const mt = cand.find(t => { try { return MediaRecorder.isTypeSupported(t); } catch (e) { return false; } });
+  try { recRecorder = mt ? new MediaRecorder(audioOnly, { mimeType: mt }) : new MediaRecorder(audioOnly); }
+  catch (e) { setHint('Aufnahme nicht möglich: ' + e.message, true); return; }
+  recChunks = [];
+  recRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  recRecorder.onstop = () => finishRecording();
+  try { recRecorder.start(); }
+  catch (e) { setHint('Aufnahme-Start fehlgeschlagen: ' + e.message, true); return; }
+  recording = true; recStartMs = performance.now();
+  elRecToggle.textContent = '■ Stopp'; elRecToggle.classList.add('rec');
+  elRecArm.disabled = true; elFileBtn.disabled = true; elMode.disabled = true; elStart.disabled = true;
+  elMidi.disabled = true; elRecSave.disabled = true;
+  closeSavePanel();
+  recTimer = setInterval(updateRecTimer, 200); updateRecTimer();
+  setHint('Aufnahme läuft … „■ Stopp" beendet und analysiert die Aufnahme.');
+}
+function updateRecTimer() {
+  setStatus('● Aufnahme … ' + fmtTime((performance.now() - recStartMs) / 1000));
+}
+function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  if (recTimer) { clearInterval(recTimer); recTimer = null; }
+  elRecToggle.textContent = '● Start'; elRecToggle.classList.remove('rec');
+  elRecArm.disabled = false; elMode.disabled = false; elMidi.disabled = false;
+  try { if (recRecorder && recRecorder.state !== 'inactive') recRecorder.stop(); }   // -> onstop -> finishRecording
+  catch (e) { finishRecording(); }
+}
+async function finishRecording() {
+  const secs = Math.max(0, (performance.now() - recStartMs) / 1000);
+  const type = (recChunks[0] && recChunks[0].type) || 'audio/webm';
+  const blob = new Blob(recChunks, { type });
+  recChunks = []; recRecorder = null;
+  disarmRecording();                       // bereitgestellte Quelle freigeben
+  elFileBtn.disabled = false;
+  if (!blob.size) { setHint('Keine Audiodaten aufgenommen. Beim Teilen „Systemaudio/Tab-Audio teilen" ankreuzen.', true); setStatus('keine Datei'); return; }
+  let arr;
+  try { arr = await blob.arrayBuffer(); }
+  catch (e) { setHint('Aufnahme konnte nicht gelesen werden: ' + e.message, true); setStatus('FEHLER'); return; }
+  await decodeAndAnalyze(arr, 'Aufnahme · ' + fmtTime(secs));   // resetFileMode (loescht recBlob) + Beat-Map
+  if (fileBuffer) {
+    recBlob = blob;                        // Original fuer WebM-Speichern behalten
+    elRecSave.disabled = false;
+    setHint('Analyse fertig. „Abspielen & senden" – oder „Speichern…", um die Aufnahme als Datei(en) zu sichern.');
+  }
+}
+function abortRecording() {        // bei Moduswechsel/Reset: Aufnahme verwerfen
+  if (recording) {
+    recording = false;
+    if (recTimer) { clearInterval(recTimer); recTimer = null; }
+    if (recRecorder) { try { recRecorder.onstop = null; recRecorder.ondataavailable = null; if (recRecorder.state !== 'inactive') recRecorder.stop(); } catch (e) {} recRecorder = null; }
+    recChunks = [];
+    elRecToggle.textContent = '● Start'; elRecToggle.classList.remove('rec');
+  }
+  disarmRecording();
+}
+
+// --- Tonart-Einmalschaetzung ueber einen Buffer-Ausschnitt (fuer Datei/Segment) ---
+function estimateKey(chans, sr, s0, s1) {
+  const N = 8192, half = N >> 1, len = s1 - s0;
+  if (len < N) return null;
+  const fft = new FFT(N), win = new Float32Array(N);
+  for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
+  const binPc = new Int8Array(half), binBass = new Uint8Array(half);
+  for (let k = 1; k < half; k++) {
+    const f = k * sr / N;
+    if (f < 55 || f > 2000) { binPc[k] = -1; continue; }
+    binPc[k] = ((((Math.round(12 * Math.log2(f / 440) + 69)) % 12) + 12) % 12);
+    binBass[k] = (f >= 55 && f <= 220) ? 1 : 0;
+  }
+  const re = new Float32Array(N), im = new Float32Array(N);
+  const c = new Float32Array(12), bas = new Float32Array(12), nCh = chans.length;
+  const hop = Math.max(N, Math.floor((len - N) / 150) || N);   // ~150 Frames ueber das Segment verteilt
+  let frames = 0;
+  for (let off = s0; off + N <= s1; off += hop) {
+    for (let i = 0; i < N; i++) { let v = 0; for (let ch = 0; ch < nCh; ch++) v += chans[ch][off + i]; if (nCh > 1) v /= nCh; re[i] = v * win[i]; im[i] = 0; }
+    fft.transform(re, im);
+    for (let k = 1; k < half; k++) { const pc = binPc[k]; if (pc < 0) continue; const mag = Math.hypot(re[k], im[k]); c[pc] += mag; if (binBass[k]) bas[pc] += mag; }
+    frames++;
+  }
+  if (!frames) return null;
+  const pcp = chromaNorm(c), bass = chromaNorm(bas);
+  return pcp ? classifyKey(pcp, bass || new Float32Array(12)) : null;
+}
+function keyFileName(name) { return (name || '').replace(/\s+/g, '_'); }
+function suggestName(seg) {
+  const parts = [];
+  if (seg.bpm) parts.push(Math.round(seg.bpm) + 'BPM');
+  if (seg.key) parts.push(keyFileName(seg.key));
+  return parts.length ? parts.join('_') : 'Aufnahme';
+}
+
+// --- Segmentierung: mehrere Stuecke an Stille + BPM/Tonart-Wechsel erkennen ---
+async function segBpm(buffer, s0, s1) {
+  const sr = buffer.sampleRate, nCh = buffer.numberOfChannels, len = s1 - s0;
+  if (len < sr * 2) return 0;
+  const sub = audioCtx.createBuffer(nCh, len, sr);
+  for (let c = 0; c < nCh; c++) sub.getChannelData(c).set(buffer.getChannelData(c).subarray(s0, s1));
+  let res = null;
+  try { res = await computeBeatMap(sub, fileMinBpm(), fileMaxBpm(), () => {}); } catch (e) {}
+  return res ? res.bpm : 0;
+}
+function mergeShort(segs, minSamples) {
+  let changed = true;
+  while (changed && segs.length > 1) {
+    changed = false;
+    for (let k = 0; k < segs.length; k++) {
+      if (segs[k].endS - segs[k].startS < minSamples) {
+        if (k > 0) { segs[k - 1].endS = segs[k].endS; segs.splice(k, 1); }
+        else { segs[k + 1].startS = segs[k].startS; segs.splice(k, 1); }
+        changed = true; break;
+      }
+    }
+  }
+  return segs;
+}
+async function analyzeSegments(buffer, bounds) {
+  const sr = buffer.sampleRate, nCh = buffer.numberOfChannels;
+  const chans = []; for (let c = 0; c < nCh; c++) chans.push(buffer.getChannelData(c));
+  const segs = [];
+  for (let k = 0; k < bounds.length - 1; k++) {
+    if (bounds[k + 1] - bounds[k] < sr) continue;
+    const seg = { startS: bounds[k], endS: bounds[k + 1] };
+    seg.bpm = await segBpm(buffer, seg.startS, seg.endS);
+    const key = estimateKey(chans, sr, seg.startS, seg.endS);
+    seg.key = key ? key.name : ''; seg.keyMargin = key ? key.margin : 0;
+    segs.push(seg);
+  }
+  for (let k = 0; k < segs.length; k++) {
+    if (k === 0) { segs[k].confident = true; }
+    else {
+      const a = segs[k - 1], b = segs[k];
+      const bpmDiff = (a.bpm && b.bpm) ? Math.abs(a.bpm - b.bpm) / ((a.bpm + b.bpm) / 2) : 0;
+      b.confident = (bpmDiff > 0.04) || (!!a.key && !!b.key && a.key !== b.key);
+    }
+    segs[k].name = suggestName(segs[k]);
+  }
+  return segs.length ? segs : [{ startS: 0, endS: buffer.length, bpm: 0, key: '', confident: true, name: 'Aufnahme' }];
+}
+async function segmentRecording(buffer) {
+  const sr = buffer.sampleRate, N = buffer.length, nCh = buffer.numberOfChannels;
+  const chans = []; for (let c = 0; c < nCh; c++) chans.push(buffer.getChannelData(c));
+  const fr = 2048, nf = Math.floor(N / fr);
+  const rms = new Float32Array(nf); let peak = 0;
+  for (let i = 0; i < nf; i++) {
+    let s = 0; const base = i * fr;
+    for (let j = 0; j < fr; j++) { let v = 0; for (let c = 0; c < nCh; c++) v += chans[c][base + j]; if (nCh > 1) v /= nCh; s += v * v; }
+    const r = Math.sqrt(s / fr); rms[i] = r; if (r > peak) peak = r;
+  }
+  const thr = Math.max(peak * 0.06, 1e-4);          // ~ -24 dB unter Peak = "still"
+  const gapFrames = Math.ceil(SONG_GAP_S * sr / fr);
+  const cuts = [];
+  for (let i = 0; i < nf;) {
+    if (rms[i] < thr) {
+      let j = i; while (j < nf && rms[j] < thr) j++;
+      if (j - i >= gapFrames) { const mid = Math.floor((i + j) / 2) * fr; if (mid > fr * 8 && mid < N - fr * 8) cuts.push(mid); }
+      i = j;
+    } else i++;
+  }
+  let segs = []; const bounds = [0, ...cuts, N];
+  for (let k = 0; k < bounds.length - 1; k++) segs.push({ startS: bounds[k], endS: bounds[k + 1] });
+  segs = mergeShort(segs, Math.floor(SONG_MIN_S * sr));
+  return analyzeSegments(buffer, [0, ...segs.slice(1).map(s => s.startS), N]);
+}
+
+// --- Speichern (WAV-Slice / WebM-Original) mit freiem Namen + Vorschlag ---
+function bufferSliceToWav(buffer, s0, s1) {
+  const sr = buffer.sampleRate, nCh = Math.min(2, buffer.numberOfChannels), len = s1 - s0;
+  const chans = []; for (let c = 0; c < nCh; c++) chans.push(buffer.getChannelData(c));
+  const blockAlign = nCh * 2, dataLen = len * blockAlign;
+  const ab = new ArrayBuffer(44 + dataLen), dv = new DataView(ab);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); dv.setUint32(4, 36 + dataLen, true); wr(8, 'WAVE'); wr(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, nCh, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * blockAlign, true);
+  dv.setUint16(32, blockAlign, true); dv.setUint16(34, 16, true); wr(36, 'data'); dv.setUint32(40, dataLen, true);
+  let off = 44;
+  for (let i = 0; i < len; i++) for (let c = 0; c < nCh; c++) {
+    let v = chans[c][s0 + i]; v = v < -1 ? -1 : v > 1 ? 1 : v;
+    dv.setInt16(off, v < 0 ? v * 32768 : v * 32767, true); off += 2;
+  }
+  return new Blob([ab], { type: 'audio/wav' });
+}
+async function saveBlob(blob, suggestedBase, ext, mime) {
+  const fname = (suggestedBase || 'Aufnahme').replace(/[\\/:*?"<>|]+/g, '_') + '.' + ext;
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: fname, types: [{ description: ext.toUpperCase() + '-Audio', accept: { [mime]: ['.' + ext] } }] });
+      const w = await handle.createWritable(); await w.write(blob); await w.close();
+      return true;
+    } catch (e) { if (e && e.name === 'AbortError') return false; }   // sonst: Fallback
+  }
+  const nm = window.prompt ? window.prompt('Dateiname:', fname) : fname;
+  if (nm === null) return false;
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nm || fname;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  return true;
+}
+async function saveSegmentWav(idx) {
+  const seg = recSegments[idx];
+  if (!seg || !fileBuffer) return;
+  await saveBlob(bufferSliceToWav(fileBuffer, seg.startS, seg.endS), seg.name || suggestName(seg), 'wav', 'audio/wav');
+}
+async function saveWholeWebm() {
+  if (!recBlob) { setHint('WebM-Original nur für Aufnahmen verfügbar.', true); return; }
+  const base = (recSegments[0] && recSegments[0].name) || 'Aufnahme';
+  await saveBlob(recBlob, base, 'webm', 'audio/webm');
+}
+
+// --- Speichern-/Pruef-Panel ---
+async function openSavePanel() {
+  if (!fileBuffer) return;
+  elRecSave.disabled = true;
+  setStatus('analysiere Stücke …');
+  setHint('Stück-Grenzen werden gesucht …');
+  await new Promise(r => setTimeout(r, 0));
+  try { recSegments = await segmentRecording(fileBuffer); }
+  catch (e) { recSegments = [{ startS: 0, endS: fileBuffer.length, bpm: fileTempoInfo ? fileTempoInfo.bpm : 0, key: '', confident: true, name: 'Aufnahme' }]; }
+  elRecSave.disabled = false;
+  if (elFmtWav) elFmtWav.checked = true;
+  renderSegList(); updateSaveNote();
+  elSavePanel.style.display = '';
+  setStatus(recSegments.length > 1 ? recSegments.length + ' Stücke erkannt' : 'ein Stück');
+}
+function closeSavePanel() { if (elSavePanel) elSavePanel.style.display = 'none'; }
+function updateSaveNote() {
+  elSaveNote.textContent = (elFmtWebm && elFmtWebm.checked)
+    ? 'WebM speichert die GANZE Aufnahme als Original (kleiner). Einzelne Stücke nur als WAV. „Alle speichern" → ganze Aufnahme.'
+    : 'WAV: jedes Stück einzeln oder „Alle speichern". Dateiname ist frei wählbar – Vorschlag aus BPM + Tonart.';
+}
+function renderSegList() {
+  if (!fileBuffer) return;
+  const sr = fileBuffer.sampleRate, webm = elFmtWebm && elFmtWebm.checked;
+  elSegList.textContent = '';
+  recSegments.forEach((seg, idx) => {
+    const row = document.createElement('div'); row.className = 'seg' + (seg.confident ? '' : ' unsure');
+    const ix = document.createElement('span'); ix.className = 'ix'; ix.textContent = (idx + 1) + '.';
+    const meta = document.createElement('span'); meta.className = 'meta';
+    meta.appendChild(document.createTextNode(fmtTime(seg.startS / sr) + '–' + fmtTime(seg.endS / sr)
+      + ' · ' + (seg.bpm ? Math.round(seg.bpm) + ' BPM' : '– BPM') + ' · '));
+    const ks = document.createElement('span'); ks.textContent = seg.key || '?'; if (!seg.confident) ks.className = 'q'; meta.appendChild(ks);
+    const inp = document.createElement('input'); inp.type = 'text'; inp.value = seg.name;
+    inp.addEventListener('input', () => { seg.name = inp.value; });
+    const btn = document.createElement('button'); btn.className = 'ghost'; btn.textContent = 'Speichern'; btn.disabled = webm;
+    btn.addEventListener('click', () => saveSegmentWav(idx));
+    row.append(ix, meta, inp, btn);
+    elSegList.appendChild(row);
+  });
+}
+async function makeWholeSegment() {
+  const b = fileBuffer, nCh = b.numberOfChannels, chans = [];
+  for (let c = 0; c < nCh; c++) chans.push(b.getChannelData(c));
+  const bpm = await segBpm(b, 0, b.length);
+  const key = estimateKey(chans, b.sampleRate, 0, b.length);
+  const seg = { startS: 0, endS: b.length, bpm, key: key ? key.name : '', keyMargin: key ? key.margin : 0, confident: true };
+  seg.name = suggestName(seg); return seg;
+}
+async function splitByTime() {
+  if (!fileBuffer) return;
+  const mins = parseFloat(window.prompt('Aufnahme alle wie viele Minuten in eigene Dateien trennen?', '4'));
+  if (!isFinite(mins) || mins <= 0) return;
+  const b = fileBuffer, sr = b.sampleRate, step = Math.max(sr, Math.floor(mins * 60 * sr));
+  const bounds = []; for (let s = 0; s < b.length; s += step) bounds.push(s); bounds.push(b.length);
+  setStatus('analysiere Stücke …'); await new Promise(r => setTimeout(r, 0));
+  recSegments = await analyzeSegments(b, bounds);
+  renderSegList(); setStatus(recSegments.length + ' Stücke (nach Zeit)');
 }
 
 async function analyzeLoadedFile() {
@@ -1996,6 +2406,10 @@ async function startFile() {
   elStart.textContent = 'Stopp'; elStart.classList.add('stop');
   setControlsDisabled(true);
   if (elFileBtn) elFileBtn.disabled = true;
+  if (elRecArm) elRecArm.disabled = true;
+  if (elRecToggle) elRecToggle.disabled = true;
+  if (elRecSave) elRecSave.disabled = true;
+  closeSavePanel();
   elMidi.disabled = true;
   setStatus('spielt …');
   setHint('Spielt driftfrei. Die MIDI-Clock ist an die Wiedergabe gekoppelt. Tab im Vordergrund lassen.');
@@ -2055,6 +2469,9 @@ function teardownFilePlayback(sendStop) {
   elStart.textContent = 'Abspielen & senden'; elStart.classList.remove('stop');
   setControlsDisabled(false);
   if (elFileBtn) elFileBtn.disabled = false;
+  if (elRecArm) elRecArm.disabled = !recAnySupported();
+  if (elRecToggle) elRecToggle.disabled = !recArmedStream;
+  if (elRecSave) elRecSave.disabled = !(recBlob && fileBuffer);
   elMidi.disabled = false;
   updateLevel(-60);
   applyModeControls();
@@ -2080,6 +2497,10 @@ function finishFile() {
 
 // Datei-Modus vollstaendig zuruecksetzen (Kontext schliessen, Zustand leeren).
 function resetFileMode() {
+  abortRecording();                      // laufende Aufnahme verwerfen
+  recBlob = null; recSegments = [];      // alte Aufnahme/Segmente verwerfen
+  if (elRecSave) elRecSave.disabled = true;
+  closeSavePanel();
   if (fileSchedTimer) { clearInterval(fileSchedTimer); fileSchedTimer = null; }
   if (fileSource) { try { fileSource.onended = null; fileSource.stop(); } catch (e) {} try { fileSource.disconnect(); } catch (e) {} fileSource = null; }
   if (fileAnalyser) { try { fileAnalyser.disconnect(); } catch (e) {} fileAnalyser = null; }
@@ -2126,7 +2547,8 @@ function analyze() {
   }
   // Tonart-Chroma (grosse FFT) nur rechnen, wenn die Anzeige aktiv ist -- spart
   // spuerbar Rechenzeit (v. a. auf dem Handy), wenn die Tonart nicht gebraucht wird.
-  if (keyEnabled) updateKey();
+  // Bei der Aufnahme wird sie immer mitgerechnet (Anzeige gewuenscht).
+  if (keyEnabled || recMonitoring) updateKey();
 }
 
 // --- Tonart: Chroma -> 50% schnelle EMA + 50% Gesamtmittel -> Klassifikation
@@ -2171,7 +2593,7 @@ function updateKey() {
                   && r.margin >= KEY_CONFIDENT_MARGIN && cumN >= KEY_CONFIDENT_MIN_N);
 }
 function updateKeyDisplay() {
-  const show = running && keyDisp !== '—';
+  const show = (running || recMonitoring) && keyDisp !== '—';
   elKeyName.textContent = show ? keyDisp : '—';
   const par = show ? parallelKey(keyDisp) : '';
   elKeyPar.textContent = par ? '(' + par + ')' : '';
@@ -2181,6 +2603,18 @@ function updateKeyDisplay() {
 
 // --- Anzeige ---
 function render() {
+  if (recMonitoring) {
+    // Bereitstellen/Aufnahme: Pegel + BPM + Tonart live anzeigen (Status setzt
+    // der Aufnahme-Timer bzw. das Bereitstellen, daher hier nicht ueberschreiben).
+    const db = levelEma > 0 ? 20 * Math.log10(levelEma) : -120;
+    updateLevel(db);
+    if (performance.now() - lastChunkTime > 1500 || db < SILENCE_DB || !haveEstimate) setBpmText('—');
+    else setBpmText(String(Math.round(median(estimates))));
+    elKeyBlock.style.display = (keyDisp !== '—') ? '' : 'none';
+    updateKeyDisplay();
+    requestAnimationFrame(render);
+    return;
+  }
   if (running && opMode === 'file') {
     renderFile();
   } else if (running) {
@@ -2281,6 +2715,22 @@ elAudioFile.addEventListener('change', (e) => {
   e.target.value = '';                 // gleiche Datei erneut waehlbar machen
   if (f) loadFile(f);
 });
+elRecArm.addEventListener('click', armRecording);
+elRecToggle.addEventListener('click', () => recording ? stopRecording() : startRecording());
+elRecSave.addEventListener('click', openSavePanel);
+elSaveAll.addEventListener('click', async () => {
+  if (elFmtWebm.checked) { await saveWholeWebm(); return; }
+  for (let i = 0; i < recSegments.length; i++) await saveSegmentWav(i);
+});
+elMergeAll.addEventListener('click', async () => {
+  if (!fileBuffer) return;
+  setStatus('analysiere …'); await new Promise(r => setTimeout(r, 0));
+  recSegments = [await makeWholeSegment()];
+  renderSegList(); setStatus('ein Stück');
+});
+elSplitTime.addEventListener('click', splitByTime);
+elSaveClose.addEventListener('click', closeSavePanel);
+[elFmtWav, elFmtWebm].forEach(el => el.addEventListener('change', () => { renderSegList(); updateSaveNote(); }));
 function maybeReanalyze() {
   if (opMode === 'file' && fileBuffer && !running && !fileAnalyzing) analyzeLoadedFile();
 }
@@ -2297,6 +2747,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (opt) { opt.disabled = true; opt.textContent += ' – hier nicht verfügbar'; }
     if (elSource.value === 'display') { elSource.value = 'input'; applySource(); }
   }
+  if (!recAnySupported()) { elRecArm.disabled = true; elRecArm.title = 'Aufnahme hier nicht verfügbar'; }
   refreshAudioInputs();
   syncCalibLabels();        // Kalibrier-Slider-Beschriftungen initialisieren
   setBpmText('—');

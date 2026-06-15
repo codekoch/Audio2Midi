@@ -111,8 +111,11 @@ in [webapp/index.html](webapp/index.html): BPM-Erkennung mit stabiler
 MIDI-Clock und optionaler Tonart-Anzeige über die Web Audio und Web MIDI API
 (Chrome/Edge). Als Quelle dient ein Audio-Eingang oder die mitgehörte
 Wiedergabe (Tab-/System-Audio über die Screen-Capture-API). Zusätzlich gibt es
-einen **Datei-Modus**, der eine geladene Audiodatei vorab zu einer Beat-Map
-analysiert und ihre MIDI-Clock **driftfrei** zur Wiedergabe ausgibt, sowie
+einen **Datei-/Aufnahme-Modus**, der eine Audiodatei – oder einen Mitschnitt
+(mitgehörte Wiedergabe oder Audio-Eingang, manuell aufgenommen) – vorab zu einer
+Beat-Map analysiert und ihre MIDI-Clock **driftfrei** zur Wiedergabe ausgibt; die
+Aufnahme lässt sich – auch in mehrere erkannte Stücke getrennt – als Datei mit
+BPM/Tonart-Namensvorschlag speichern. Außerdem gibt es
 einen **Noten-Modus** (Pitch → MIDI, mono-/polyphon) und einen
 **Akkord-Modus**, der angeschlagene Akkorde (z. B. Gitarre) erkennt und als
 sauberen MIDI-Akkord sendet. Einfach im Browser öffnen – kein Server nötig.
