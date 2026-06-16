@@ -130,6 +130,30 @@ main {
 .savep .saveactions { display: flex; gap: 10px; flex-wrap: wrap; }
 .savep .note { font-size: 12px; color: var(--muted); margin: 0; }
 
+/* DJ-Modus: zwei Decks + Crossfader */
+.dj { display: flex; gap: 18px; align-items: stretch; justify-content: center; width: min(1100px, 96%); margin: 8px auto 0; }
+.dj .deck { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--surface-hi); border-radius: 10px; padding: 14px 16px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+.dj .deck.active { border-color: var(--accent); background: #20302a; }
+.dj .decktop { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.dj .deckno { font-size: 12px; color: var(--muted); letter-spacing: .1em; }
+.dj .decktop .filelbl { font-size: 12px; max-width: 60%; }
+.dj .djbpm { font-size: clamp(40px, 8vw, 84px); font-weight: 700; color: var(--accent); line-height: 1.05; font-variant-numeric: tabular-nums; }
+.dj .djbpm.idle { color: var(--muted); opacity: .5; }
+.dj .djkey { font-size: 18px; font-weight: 600; color: var(--fg); min-height: 1.3em; }
+.dj .djkey.idle { color: var(--muted); opacity: .6; }
+.dj .djpos { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dj .deck-lvl { height: 8px; margin: 8px 0; }
+.dj .deckbtns { display: flex; gap: 8px; justify-content: center; margin-top: 8px; }
+.dj .xfade { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-width: 120px; }
+.dj .xfade input[type="range"] { width: 110px; accent-color: var(--accent); }
+.dj .djclock { font-size: 13px; color: var(--accent); font-weight: 700; }
+main.djmode .sv { display: none !important; }   /* Einzeltrack-Anzeige im DJ-Modus aus */
+@media (max-width: 700px) {
+  .dj { flex-direction: column; gap: 10px; }
+  .dj .xfade { flex-direction: row; min-width: 0; }
+  .dj .xfade input[type="range"] { flex: 1; }
+}
+
 /* Kompaktere Darstellung auf schmalen Bildschirmen (Handy) */
 @media (max-width: 600px) {
   header { flex-direction: column; align-items: flex-start; gap: 1px; padding: 8px 14px; }
@@ -171,6 +195,7 @@ main {
         <option value="mono">Noten → MIDI (monophon)</option>
         <option value="poly">Noten → MIDI (polyphon)</option>
         <option value="chord">Noten → MIDI (Akkorde)</option>
+        <option value="dj">DJ (2 Decks, Clock folgt)</option>
       </select>
     </div>
     <div class="field" id="srcField">
@@ -240,7 +265,7 @@ main {
         <input type="checkbox" id="beatSync" checked> auf Beat
       </label>
     </div>
-    <div class="field">
+    <div class="field" id="ssField">
       <label for="startStop">MIDI Start/Stop</label>
       <label class="chk" title="MIDI Start/Stop senden? Aus = nur durchgehende Clock; du startest dein Gerät selbst.">
         <input type="checkbox" id="startStop"> senden
@@ -307,11 +332,11 @@ main {
   </section>
 
   <main>
-    <div class="bpm idle" id="bpm">—</div>
-    <div class="cap" id="bpmCap">BPM</div>
-    <div class="raw" id="raw">roh: —</div>
+    <div class="bpm idle sv" id="bpm">—</div>
+    <div class="cap sv" id="bpmCap">BPM</div>
+    <div class="raw sv" id="raw">roh: —</div>
     <div class="status" id="status">bereit</div>
-    <div class="keyrow" id="keyRow" style="display:none">
+    <div class="keyrow sv" id="keyRow" style="display:none">
       <div class="keyblock" id="keyBlock" style="display:none">
         <div class="key"><span id="keyName" class="idle">—</span><span class="par" id="keyPar"></span></div>
         <div class="cap">TONART</div>
@@ -321,10 +346,44 @@ main {
         <div class="cap">AKKORD</div>
       </div>
     </div>
-    <div class="level">
+    <div class="level sv">
       <span class="lbl">PEGEL</span>
       <div class="track"><div id="levelBar"></div></div>
       <span class="db" id="db">-60 dB</span>
+    </div>
+
+    <!-- DJ-Modus: zwei Decks nebeneinander, Crossfader, Clock folgt -->
+    <div class="dj" id="djPanel" style="display:none">
+      <div class="deck" id="djDeckA" data-deck="0">
+        <div class="decktop"><span class="deckno">DECK A</span><span class="filelbl" id="djNameA">keine Datei</span></div>
+        <div class="djbpm" id="djBpmA">—</div><div class="cap">BPM</div>
+        <div class="djkey" id="djKeyA">—</div>
+        <div class="djpos" id="djPosA">–</div>
+        <div class="track deck-lvl"><div id="djLvlA"></div></div>
+        <div class="deckbtns">
+          <button class="ghost" id="djFileA">Datei A…</button>
+          <button class="ghost" id="djPlayA" disabled>▶</button>
+        </div>
+      </div>
+      <div class="xfade">
+        <button class="ghost" id="djToA" title="zu Deck A überblenden (Clock folgt)">◀ A</button>
+        <input type="range" id="djCross" min="0" max="100" value="0" title="Crossfader A ↔ B">
+        <button class="ghost" id="djToB" title="zu Deck B überblenden (Clock folgt)">B ▶</button>
+        <div class="djclock" id="djClockLbl">Clock: A</div>
+      </div>
+      <div class="deck" id="djDeckB" data-deck="1">
+        <div class="decktop"><span class="deckno">DECK B</span><span class="filelbl" id="djNameB">keine Datei</span></div>
+        <div class="djbpm" id="djBpmB">—</div><div class="cap">BPM</div>
+        <div class="djkey" id="djKeyB">—</div>
+        <div class="djpos" id="djPosB">–</div>
+        <div class="track deck-lvl"><div id="djLvlB"></div></div>
+        <div class="deckbtns">
+          <button class="ghost" id="djFileB">Datei B…</button>
+          <button class="ghost" id="djPlayB" disabled>▶</button>
+        </div>
+      </div>
+      <input type="file" id="djFileInA" accept="audio/*" style="display:none">
+      <input type="file" id="djFileInB" accept="audio/*" style="display:none">
     </div>
   </main>
 
@@ -1220,9 +1279,23 @@ let grantedLabel = '';
 let midiRequested = false;
 
 // Betriebsart + Noten-Modus
-let opMode = 'clock';          // 'clock' | 'file' | 'mono' | 'poly' | 'chord'
+let opMode = 'clock';          // 'clock' | 'file' | 'mono' | 'poly' | 'chord' | 'dj'
 let noteEngine = null;
 let midiOut = null;            // aktiver MIDI-Ausgang (auch fuer Noten-Modus)
+
+// DJ-Modus: zwei Decks, Audio-Crossfade, MIDI-Clock folgt dem aktiven Deck
+let djCtx = null;              // gemeinsamer AudioContext beider Decks
+let djCross = 0;               // Crossfader 0..1 (0=A, 1=B)
+let djCrossTarget = 0;         // Zielwert (sanftes Faden)
+let djActive = 0;              // Deck, dem die Clock folgt (0/1)
+let djSchedTimer = null;       // Scheduler-Intervall (MIDI-Clock)
+const djDecks = [djDeckState(), djDeckState()];
+function djDeckState() {
+  return { buffer: null, ticks: null, beats: null, tempoInfo: null, key: '',
+    source: null, gain: null, analyser: null, timeBuf: null,
+    startCtxTime: 0, nextTickIdx: 0, playing: false,
+    bpmEl: null, keyEl: null, posEl: null, lvlBar: null, nameEl: null, playBtn: null, deckEl: null };
+}
 
 // Datei-Modus
 let fileBuffer = null;         // dekodierter AudioBuffer der geladenen Datei
@@ -1286,6 +1359,14 @@ const elFileField = $('fileField'), elFileBtn = $('fileBtn'), elFileNameLbl = $(
 const elRecField = $('recField'), elRecArm = $('recArm'), elRecToggle = $('recToggle'), elRecSave = $('recSave');
 const elSavePanel = $('savePanel'), elSegList = $('segList'), elFmtWav = $('fmtWav'), elFmtWebm = $('fmtWebm');
 const elSaveAll = $('saveAll'), elMergeAll = $('mergeAll'), elSplitTime = $('splitTime'), elSaveClose = $('saveClose'), elSaveNote = $('saveNote');
+const elSsField = $('ssField'), elMainEl = document.querySelector('main');
+const elDjPanel = $('djPanel'), elDjCross = $('djCross'), elDjClock = $('djClockLbl');
+const elDjToA = $('djToA'), elDjToB = $('djToB'), elDjFileInA = $('djFileInA'), elDjFileInB = $('djFileInB');
+// Deck-Elemente in die djDecks-Struktur haengen
+djDecks[0].bpmEl = $('djBpmA'); djDecks[0].keyEl = $('djKeyA'); djDecks[0].posEl = $('djPosA');
+djDecks[0].lvlBar = $('djLvlA'); djDecks[0].nameEl = $('djNameA'); djDecks[0].playBtn = $('djPlayA'); djDecks[0].deckEl = $('djDeckA');
+djDecks[1].bpmEl = $('djBpmB'); djDecks[1].keyEl = $('djKeyB'); djDecks[1].posEl = $('djPosB');
+djDecks[1].lvlBar = $('djLvlB'); djDecks[1].nameEl = $('djNameB'); djDecks[1].playBtn = $('djPlayB'); djDecks[1].deckEl = $('djDeckB');
 const elCalibField = $('calibField'), elCalibToggle = $('calibToggle'), elCalibPanel = $('calibPanel');
 const elCalibReset = $('calibReset'), elCalibNote = $('calibNote');
 const cLat = $('cLatency'), cLatV = $('cLatencyV'), cSil = $('cSilence'), cSilV = $('cSilenceV');
@@ -1418,20 +1499,28 @@ function applyModeControls() {
 }
 function applyMode() {
   if (holdActive) setHold(false);      // Hold beim Moduswechsel loesen
+  const prevMode = opMode;
   opMode = elMode.value;
   const note = (opMode === 'mono' || opMode === 'poly' || opMode === 'chord');
   const file = opMode === 'file';
+  const dj = opMode === 'dj';
+  if (prevMode === 'dj' && !dj) djTeardown();   // DJ-Decks/AudioContext freigeben
   if (!file) resetFileMode();          // Datei-Audio freigeben, wenn der Modus verlassen wird
   // Felder ein-/ausblenden. Quelle/Eingang sind im Datei-Modus jetzt die
   // AUFNAHME-Quelle (Mithören oder Audio-Eingang) und bleiben sichtbar.
-  elSrcField.style.display  = '';
-  elInField.style.display   = '';
+  elSrcField.style.display  = dj ? 'none' : '';
+  elInField.style.display   = dj ? 'none' : '';
   elFileField.style.display = file ? '' : 'none';
   elRecField.style.display  = file ? '' : 'none';
-  elKeyField.style.display  = file ? 'none' : '';
-  elChordField.style.display = file ? 'none' : '';
-  elHoldField.style.display = file ? 'none' : '';
-  elOctField.style.display  = file ? 'none' : '';
+  elKeyField.style.display  = (file || dj) ? 'none' : '';
+  elChordField.style.display = (file || dj) ? 'none' : '';
+  elHoldField.style.display = (file || dj) ? 'none' : '';
+  elSyncField.style.display = dj ? 'none' : '';
+  elSsField.style.display   = dj ? 'none' : '';
+  elOctField.style.display  = (file || dj) ? 'none' : '';
+  elStart.style.display     = dj ? 'none' : '';        // DJ nutzt eigene Deck-Tasten
+  elDjPanel.style.display   = dj ? '' : 'none';
+  elMainEl.classList.toggle('djmode', dj);             // Einzeltrack-Anzeige im DJ-Modus aus
   if (!file) closeSavePanel();
   applyModeControls();
   elBpmCap.textContent = note ? (opMode === 'chord' ? 'AKKORD' : opMode === 'poly' ? 'NOTEN' : 'NOTE') : 'BPM';
@@ -1439,7 +1528,12 @@ function applyMode() {
   setBpmText('—');
   elRaw.textContent = (opMode === 'clock') ? 'roh: —' : '';
   updateKeyChordVis();                 // Tonart-/Akkord-Bloecke je nach Modus + Schaltern
-  if (file) {
+  if (dj) {
+    setStatus('DJ-Modus');
+    setHint('DJ: „Datei A…"/„Datei B…" laden (werden analysiert) → je Deck ▶ abspielen → '
+          + 'mit „◀ A"/„B ▶", dem Crossfader oder Klick auf ein Deck überblenden. Die MIDI-Clock '
+          + 'folgt dem Deck, zu dem geblendet wird. MIDI-Ausgang wählen.');
+  } else if (file) {
     elStart.textContent = 'Abspielen & senden';
     elStart.classList.remove('stop');
     elStart.disabled = !(fileBuffer && fileTickTimes && fileTickTimes.length);
@@ -2630,6 +2724,174 @@ function resetFileMode() {
   if (elFileNameLbl) elFileNameLbl.textContent = 'keine Datei';
 }
 
+// ===========================================================================
+// DJ-Modus: zwei Decks, Audio-Crossfade, MIDI-Clock folgt dem aktiven Deck.
+// Jedes Deck wird (wie der Datei-Modus) offline zur Beat-Map analysiert; die
+// Clock terminiert die 24-PPQN-Ticks des aktiven Decks gegen dessen Wiedergabe
+// (getOutputTimestamp -> driftfrei). Beim Faden uebernimmt die Clock das andere
+// Deck. Beide Decks koennen gleichzeitig laufen (echtes Crossfaden).
+// ===========================================================================
+function djEnsureCtx() {
+  if (!djCtx) { try { djCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  return djCtx;
+}
+function djDeckLetter(i) { return i ? 'B' : 'A'; }
+async function djLoad(deckIdx, file) {
+  if (!djEnsureCtx()) { setHint('Audio-Kontext fehlgeschlagen.', true); return; }
+  const d = djDecks[deckIdx];
+  if (d.playing) djStop(deckIdx);
+  d.buffer = null; d.ticks = null; d.beats = null; d.tempoInfo = null; d.key = '';
+  d.nameEl.textContent = file && file.name ? file.name : ('Deck ' + djDeckLetter(deckIdx));
+  d.playBtn.disabled = true;
+  d.bpmEl.textContent = '…'; d.bpmEl.classList.add('idle'); d.keyEl.textContent = ''; d.posEl.textContent = 'dekodiere …';
+  let arr;
+  try { arr = await file.arrayBuffer(); } catch (e) { d.posEl.textContent = 'Lesefehler'; return; }
+  let buf;
+  try { buf = await djCtx.decodeAudioData(arr); } catch (e) { d.posEl.textContent = 'Format?'; d.bpmEl.textContent = '—'; return; }
+  d.posEl.textContent = 'analysiere …';
+  await new Promise(r => setTimeout(r, 0));
+  let res = null;
+  try { res = await computeBeatMap(buf, fileMinBpm(), fileMaxBpm(), () => {}); } catch (e) {}
+  const nCh = buf.numberOfChannels, chans = []; for (let c = 0; c < nCh; c++) chans.push(buf.getChannelData(c));
+  let key = null; try { key = estimateKey(chans, buf.sampleRate, 0, buf.length); } catch (e) {}
+  d.buffer = buf;
+  d.beats = (res && res.beats) ? res.beats : null;
+  d.ticks = (res && res.beats && res.beats.length >= 2) ? buildTickTimes(res.beats, buf.duration) : null;
+  d.tempoInfo = res; d.key = key ? key.name : '';
+  d.playBtn.disabled = false;
+  djUpdateDeckStatic(deckIdx);
+  setHint('Deck ' + djDeckLetter(deckIdx) + ': ' + (res ? Math.round(res.bpm) + ' BPM' : 'kein klares Tempo')
+        + (key ? ' · ' + key.name : '') + '. ▶ zum Abspielen, dann faden.');
+}
+function djUpdateDeckStatic(i) {
+  const d = djDecks[i];
+  const bpm = d.tempoInfo ? Math.round(d.tempoInfo.bpm) : 0;
+  d.bpmEl.textContent = bpm ? String(bpm) : '—';
+  d.bpmEl.classList.toggle('idle', !bpm);
+  d.keyEl.textContent = d.key || '';
+  if (!d.playing) d.posEl.textContent = d.buffer ? ('0:00 / ' + fmtTime(d.buffer.duration)) : '–';
+}
+function djPlay(deckIdx) {
+  const d = djDecks[deckIdx];
+  if (!d.buffer || !djEnsureCtx()) return;
+  if (d.playing) { djStop(deckIdx); return; }
+  try { djCtx.resume(); } catch (e) {}
+  try {
+    d.source = djCtx.createBufferSource(); d.source.buffer = d.buffer;
+    d.gain = djCtx.createGain(); d.gain.gain.value = 0;
+    d.analyser = djCtx.createAnalyser(); d.analyser.fftSize = 1024; d.timeBuf = new Float32Array(1024);
+    d.source.connect(d.gain); d.gain.connect(djCtx.destination); d.source.connect(d.analyser);
+  } catch (e) { setHint('Deck ' + djDeckLetter(deckIdx) + ' Wiedergabe fehlgeschlagen: ' + e.message, true); return; }
+  d.startCtxTime = djCtx.currentTime + FILE_LEAD_S;
+  d.nextTickIdx = 0;
+  d.source.onended = () => { if (d.playing) djStop(deckIdx); };
+  try { d.source.start(d.startCtxTime); } catch (e) { return; }
+  d.playing = true; d.playBtn.textContent = '⏸';
+  djApplyCross();
+  djStartScheduler();
+}
+function djStop(deckIdx) {
+  const d = djDecks[deckIdx];
+  if (d.source) { try { d.source.onended = null; d.source.stop(); } catch (e) {} try { d.source.disconnect(); } catch (e) {} d.source = null; }
+  if (d.gain) { try { d.gain.disconnect(); } catch (e) {} d.gain = null; }
+  if (d.analyser) { try { d.analyser.disconnect(); } catch (e) {} d.analyser = null; }
+  d.timeBuf = null; d.playing = false; d.nextTickIdx = 0;
+  if (d.playBtn) d.playBtn.textContent = '▶';
+  if (d.lvlBar) d.lvlBar.style.width = '0%';
+  djUpdateDeckStatic(deckIdx);
+  if (!djDecks[0].playing && !djDecks[1].playing) djStopScheduler();
+}
+function djAnyPlaying() { return djDecks[0].playing || djDecks[1].playing; }
+// Equal-Power-Crossfade: A = cos, B = sin.
+function djApplyCross() {
+  if (!djCtx) return;
+  const x = Math.max(0, Math.min(1, djCross));
+  const gA = Math.cos(x * Math.PI / 2), gB = Math.sin(x * Math.PI / 2);
+  if (djDecks[0].gain) djDecks[0].gain.gain.setTargetAtTime(gA, djCtx.currentTime, 0.02);
+  if (djDecks[1].gain) djDecks[1].gain.gain.setTargetAtTime(gB, djCtx.currentTime, 0.02);
+}
+// Zu einem Deck faden (Klick/Knopf): Ziel-Deck ggf. starten, sanft ueberblenden;
+// die Clock folgt automatisch, sobald das Ziel-Deck dominiert (djRender).
+function djFadeTo(deckIdx) {
+  const d = djDecks[deckIdx];
+  if (!d.buffer) return;
+  if (!d.playing) djPlay(deckIdx);
+  djCrossTarget = deckIdx ? 1 : 0;
+}
+function djSetActive(act) {
+  djActive = act;
+  const d = djDecks[act];
+  if (d.playing && d.ticks) {       // Tick-Index auf die aktuelle Position des neuen Decks setzen
+    const pos = djCtx.currentTime - d.startCtxTime;
+    let lo = 0, hi = d.ticks.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (d.ticks[m] < pos) lo = m + 1; else hi = m; }
+    d.nextTickIdx = lo;
+  }
+}
+function djStartScheduler() { if (!djSchedTimer) djSchedTimer = setInterval(djScheduleTick, FILE_SCHED_INTERVAL_MS); }
+function djStopScheduler() { if (djSchedTimer) { clearInterval(djSchedTimer); djSchedTimer = null; } }
+function djScheduleTick() {
+  const d = djDecks[djActive];
+  if (!djCtx || !d || !d.playing || !d.ticks) return;
+  let ctxNow, perfNow;
+  const ots = djCtx.getOutputTimestamp ? djCtx.getOutputTimestamp() : null;
+  if (ots && typeof ots.contextTime === 'number' && typeof ots.performanceTime === 'number' && ots.contextTime > 0) {
+    ctxNow = ots.contextTime; perfNow = ots.performanceTime;
+  } else { ctxNow = djCtx.currentTime; perfNow = performance.now(); }
+  const pos = ctxNow - d.startCtxTime;
+  const horizon = pos + FILE_SCHED_LOOKAHEAD_S;
+  while (d.nextTickIdx < d.ticks.length && d.ticks[d.nextTickIdx] < horizon) {
+    const tcTarget = d.startCtxTime + d.ticks[d.nextTickIdx];
+    let perfTarget = perfNow + (tcTarget - ctxNow) * 1000;
+    if (perfTarget < perfNow) perfTarget = perfNow;
+    if (midiOut) { try { midiOut.send([MSG_CLOCK], perfTarget); } catch (e) {} }
+    d.nextTickIdx++;
+  }
+}
+function djRender() {
+  if (!djCtx) { elDjClock.textContent = 'Clock: –'; return; }
+  // sanftes Faden zum Ziel
+  if (Math.abs(djCross - djCrossTarget) > 0.002) {
+    djCross += (djCrossTarget - djCross) * 0.10;
+    if (Math.abs(djCross - djCrossTarget) < 0.005) djCross = djCrossTarget;
+    elDjCross.value = Math.round(djCross * 100);
+    djApplyCross();
+  }
+  const act = djCross >= 0.5 ? 1 : 0;
+  if (act !== djActive) djSetActive(act);
+  for (let i = 0; i < 2; i++) {
+    const d = djDecks[i];
+    if (d.playing && d.analyser && d.timeBuf) {
+      d.analyser.getFloatTimeDomainData(d.timeBuf);
+      let s = 0; for (let k = 0; k < d.timeBuf.length; k++) s += d.timeBuf[k] * d.timeBuf[k];
+      const rms = Math.sqrt(s / d.timeBuf.length), db = rms > 0 ? 20 * Math.log10(rms) : -120;
+      d.lvlBar.style.width = Math.max(0, Math.min(100, (db + 60) / 60 * 100)) + '%';
+      const pos = djCtx.currentTime - d.startCtxTime;
+      d.posEl.textContent = fmtTime(Math.max(0, pos)) + ' / ' + fmtTime(d.buffer.duration);
+    } else if (!d.playing && d.lvlBar) d.lvlBar.style.width = '0%';
+    if (d.deckEl) d.deckEl.classList.toggle('active', i === act && djAnyPlaying());
+  }
+  elDjClock.textContent = djAnyPlaying() ? ('Clock folgt: ' + djDeckLetter(act)) : 'Clock: –';
+}
+function djTeardown() {
+  djStopScheduler();
+  djStop(0); djStop(1);
+  if (djCtx) { try { djCtx.close(); } catch (e) {} djCtx = null; }
+  for (let i = 0; i < 2; i++) {
+    const d = djDecks[i];
+    d.buffer = null; d.ticks = null; d.beats = null; d.tempoInfo = null; d.key = '';
+    if (d.nameEl) d.nameEl.textContent = 'keine Datei';
+    if (d.bpmEl) { d.bpmEl.textContent = '—'; d.bpmEl.classList.add('idle'); }
+    if (d.keyEl) d.keyEl.textContent = '';
+    if (d.posEl) d.posEl.textContent = '–';
+    if (d.lvlBar) d.lvlBar.style.width = '0%';
+    if (d.playBtn) { d.playBtn.textContent = '▶'; d.playBtn.disabled = true; }
+    if (d.deckEl) d.deckEl.classList.remove('active');
+  }
+  djCross = 0; djCrossTarget = 0; djActive = 0;
+  if (elDjCross) elDjCross.value = 0;
+}
+
 // --- Audio-Bloecke + Analyse ---
 function onChunk(chunk) {
   if (!analyzer || holdActive) return;   // Hold: Bloecke verwerfen (Anzeige/Clock eingefroren)
@@ -2751,6 +3013,7 @@ function updateChordDisplay() {
 
 // --- Anzeige ---
 function render() {
+  if (opMode === 'dj') { djRender(); requestAnimationFrame(render); return; }
   if (recMonitoring) {
     // Bereitstellen/Aufnahme: Pegel + BPM + Tonart live anzeigen (Status setzt
     // der Aufnahme-Timer bzw. das Bereitstellen, daher hier nicht ueberschreiben).
@@ -2924,6 +3187,21 @@ elMergeAll.addEventListener('click', async () => {
 elSplitTime.addEventListener('click', splitByTime);
 elSaveClose.addEventListener('click', closeSavePanel);
 [elFmtWav, elFmtWebm].forEach(el => el.addEventListener('change', () => { renderSegList(); updateSaveNote(); }));
+
+// DJ-Modus: Dateien laden, abspielen, faden.
+$('djFileA').addEventListener('click', () => elDjFileInA.click());
+$('djFileB').addEventListener('click', () => elDjFileInB.click());
+elDjFileInA.addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) djLoad(0, f); });
+elDjFileInB.addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) djLoad(1, f); });
+djDecks[0].playBtn.addEventListener('click', (e) => { e.stopPropagation(); djPlay(0); });
+djDecks[1].playBtn.addEventListener('click', (e) => { e.stopPropagation(); djPlay(1); });
+$('djFileA').addEventListener('click', (e) => e.stopPropagation());
+$('djFileB').addEventListener('click', (e) => e.stopPropagation());
+elDjToA.addEventListener('click', () => djFadeTo(0));
+elDjToB.addEventListener('click', () => djFadeTo(1));
+elDjCross.addEventListener('input', () => { djCross = djCrossTarget = (+elDjCross.value) / 100; djApplyCross(); });
+djDecks[0].deckEl.addEventListener('click', () => djFadeTo(0));
+djDecks[1].deckEl.addEventListener('click', () => djFadeTo(1));
 function maybeReanalyze() {
   if (opMode === 'file' && fileBuffer && !running && !fileAnalyzing) analyzeLoadedFile();
 }

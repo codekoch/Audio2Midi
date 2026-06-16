@@ -46,8 +46,9 @@ oder Übergänge, in denen die Live-Analyse sonst „abreißen" würde. Erneuter
 setzt fort; die bisherige Tempo-/Tonart-Historie bleibt erhalten.
 
 Über **„Modus"** stehen mehrere Betriebsarten zur Wahl: „Tempo & MIDI-Clock"
-(live, oben beschrieben), „Datei/Aufnahme → MIDI-Clock (driftfrei)" (siehe
-unten) sowie die Noten-Modi (monophon/polyphon/Akkorde).
+(live, oben beschrieben), „Datei/Aufnahme → MIDI-Clock (driftfrei)", die
+Noten-Modi (monophon/polyphon/Akkorde) sowie der **DJ-Modus** (zwei Decks,
+Audio-Crossfade, Clock folgt) – alle siehe unten.
 
 ## Datei/Aufnahme → MIDI-Clock (driftfrei)
 
@@ -185,6 +186,30 @@ mono­phonen Synth:
 Die Regler-Werte zeigen neben dem Frame-Wert die ungefähre Zeit in
 Millisekunden (abhängig von der gewählten Latenz). **„Zurücksetzen"** stellt
 die für den Modus sinnvollen Standardwerte wieder her.
+
+## DJ-Modus (2 Decks, Clock folgt)
+
+Über **„Modus" → „DJ (2 Decks, Clock folgt)"** lassen sich **zwei Tracks
+nebeneinander** laden und mischen – die MIDI-Clock folgt automatisch dem Track,
+zu dem übergeblendet wird.
+
+- **Laden & analysieren:** Mit **„Datei A…"** und **„Datei B…"** je eine
+  Audiodatei laden. Jedes Deck wird – wie der Datei-Modus – einmalig offline zu
+  einer Beat-Map analysiert (BPM + Tonart werden angezeigt). Das geht **auch,
+  während das andere Deck schon läuft**.
+- **Abspielen & faden:** Je Deck mit **▶** starten (beide können gleichzeitig
+  laufen). Übergeblendet wird mit dem **Crossfader**, den Tasten **„◀ A"/„B ▶"**
+  oder per **Klick auf ein Deck** – das Audio wird (gleiche Leistung,
+  equal-power) hörbar überblendet.
+- **Clock folgt:** Die **MIDI-Clock** taktet driftfrei den Track, zu dem
+  geblendet wird (ihre 24-PPQN-Ticks werden gegen dessen Wiedergabeposition
+  terminiert). Sobald ein Deck dominiert (Crossfader über der Mitte), übernimmt
+  die Clock dessen Tempo – das angeschlossene Gerät läuft also synchron zum
+  gerade gehörten Track. Beim Wechsel passt sich das Tempo an (kein Beatmatch –
+  die Clock springt auf das neue Songtempo).
+
+Tipp: Den BPM-Bereich vor dem Laden grob passend setzen (steuert die Analyse).
+Den Tab im Vordergrund lassen.
 
 ## Wiedergabe mithören (Loopback)
 

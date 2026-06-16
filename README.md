@@ -116,9 +116,11 @@ einen **Datei-/Aufnahme-Modus**, der eine Audiodatei – oder einen Mitschnitt
 Beat-Map analysiert und ihre MIDI-Clock **driftfrei** zur Wiedergabe ausgibt; die
 Aufnahme lässt sich – auch in mehrere erkannte Stücke getrennt – als Datei mit
 BPM/Tonart-Namensvorschlag speichern. Außerdem gibt es
-einen **Noten-Modus** (Pitch → MIDI, mono-/polyphon) und einen
+einen **Noten-Modus** (Pitch → MIDI, mono-/polyphon), einen
 **Akkord-Modus**, der angeschlagene Akkorde (z. B. Gitarre) erkennt und als
-sauberen MIDI-Akkord sendet. Einfach im Browser öffnen – kein Server nötig.
+sauberen MIDI-Akkord sendet, sowie einen **DJ-Modus** (zwei Decks nebeneinander,
+Audio-Crossfade, MIDI-Clock folgt dem überblendeten Track). Einfach im Browser
+öffnen – kein Server nötig.
 
 👉 **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
 
