@@ -135,8 +135,8 @@ Schritte bewusst **nicht** mit – für möglichst geringe Latenz.
   die nicht zum Akkord gehören (meist Fehlerkennungen), fallen weg** – gesendet
   werden nur die Akkordtöne, als Grundstellung in der gespielten Lage. Der
   Akkord wird **gehalten**, bis sicher ein anderer erkannt wird oder es still
-  wird (kein Geflacker). Angezeigt wird der Akkordname plus die gesendeten
-  Noten (z. B. „E  E2 G#2 B2").
+  wird (kein Geflacker). Angezeigt wird der **Akkordname** groß und darunter
+  klein/grau in Klammern die gesendeten Noten (z. B. „E" mit „(E2 G#2 B2)").
 
 Velocity wird aus dem Pegel abgeleitet, gesendet wird auf MIDI-Kanal 1.
 Beim Stoppen/Umschalten werden alle offenen Noten beendet (Note Off).

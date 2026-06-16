@@ -87,6 +87,8 @@ main {
 }
 .bpm.idle { color: var(--muted); opacity: .5; }
 .bpm.notes { font-size: clamp(36px, 9vw, 100px); }   /* Noten-Modus: mehrere Namen */
+/* Akkord-Modus: erkannte Noten klein, grau, in Klammern unter dem Akkord */
+.bpm .chordsub { display: block; font-size: .28em; font-weight: 600; color: var(--muted); line-height: 1.2; margin-top: .12em; }
 .keyblock { margin-top: 26px; text-align: center; }
 .key { font-size: clamp(40px, 9vw, 88px); font-weight: 700; line-height: 1; }
 #keyName { color: var(--accent); }
@@ -930,6 +932,7 @@ class NoteEngine {
     this.buf = new Float32Array(this.win);
     this.filled = 0;
     this.display = '—';
+    this.displayNotes = '';           // Akkord-Modus: erkannte Noten (klein unter dem Akkord)
     this.transpose = 0;               // Oktav-Transponierung der Ausgabe (Halbtoene)
     this.curNote = -1; this.candNote = -1; this.candN = 0; this.offCount = 0;   // mono
     this.active = new Map();          // poly: midi -> Anzahl Frames ohne Beleg
@@ -1147,14 +1150,14 @@ class NoteEngine {
       for (const m of voicing) this._noteOn(m, vel);
       this.chordNotes = voicing; this.chordRoot = match.root; this.chordTypeIdx = match.typeIdx;
       this.candKey = ''; this.candN = 0;
-      const name = NOTE_NAMES[match.root] + CHORD_TYPES[match.typeIdx][0];
-      this.display = name + '  ' + voicing.map(m => midiName(this._out(m))).join(' ');
+      this.display = NOTE_NAMES[match.root] + CHORD_TYPES[match.typeIdx][0];
+      this.displayNotes = voicing.map(m => midiName(this._out(m))).join(' ');
     }
   }
   _chordOff() {
     for (const m of this.chordNotes) this._noteOff(m);
     this.chordNotes = []; this.chordRoot = -1; this.chordTypeIdx = -1;
-    this.offCount = 0; this.chordChroma = null; this.display = '—';
+    this.offCount = 0; this.chordChroma = null; this.display = '—'; this.displayNotes = '';
   }
   allOff() {
     if (this.curNote !== -1) { this._noteOff(this.curNote); this.curNote = -1; }
@@ -1163,7 +1166,7 @@ class NoteEngine {
     for (const m of this.chordNotes) this._noteOff(m);
     this.chordNotes = []; this.chordRoot = -1; this.chordTypeIdx = -1; this.candKey = ''; this.chordChroma = null;
     this.offCount = 0; this.candNote = -1; this.candN = 0;
-    this.display = '—';
+    this.display = '—'; this.displayNotes = '';
   }
 }
 
@@ -2709,7 +2712,15 @@ function render() {
       if (performance.now() - lastChunkTime > 1500) setStatus('KEIN AUDIO – Eingang prüfen');
       else setStatus(opMode === 'chord' ? 'Akkord-Modus' : opMode === 'poly' ? 'Noten-Modus (polyphon)' : 'Noten-Modus (monophon)');
       const disp = noteEngine ? noteEngine.display : '—';
-      elBpm.textContent = disp;
+      const sub = (opMode === 'chord' && noteEngine) ? noteEngine.displayNotes : '';
+      if (sub) {
+        // Akkord gross, erkannte Noten klein/grau in Klammern darunter
+        elBpm.textContent = disp;
+        const el = document.createElement('span'); el.className = 'chordsub'; el.textContent = '(' + sub + ')';
+        elBpm.appendChild(el);
+      } else {
+        elBpm.textContent = disp;
+      }
       elBpm.classList.toggle('idle', disp === '—');
       elRaw.textContent = '';
     } else if (performance.now() - lastChunkTime > 1500) {
