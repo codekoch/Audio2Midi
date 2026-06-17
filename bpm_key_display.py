@@ -197,6 +197,8 @@ class DisplayApp:
         self._dj_load_res = None              # (idx, audio, sr, info, key, name)
         self._dj_stems_res = None             # (idx, stems, sr, err) vom Trenn-Thread
         self._stems_export_res = None         # (paths|None, err) vom Export-Thread
+        self._rec_stems_res = None            # (stems|None, sr, err) Aufnahme->Stems
+        self._stem_players = []               # offene StemPlayer (Aufnahme->Stems)
         self._load_options()                  # Optionen + BPM-Bereich anwenden
 
         # ---- Schriften (Groesse wird bei Resize angepasst) ----
@@ -972,9 +974,114 @@ class DisplayApp:
             padx=18, pady=6, highlightthickness=0, cursor="hand2",
             state="disabled")
         self._rec_all_btn.pack(side="left")
+        self._small_button(bf, "In Stems trennen & abspielen",
+                           self._rec_to_stems).pack(side="left", padx=(10, 0))
         self._small_button(bf, "Schließen", win.destroy).pack(side="right")
         threading.Thread(target=self._segment_rec_thread, daemon=True).start()
         win.after(250, self._poll_rec_segs)
+
+    def _rec_to_stems(self):
+        """Aufnahme direkt per KI in Stems trennen und in einem Stem-Player
+        abspielbar machen (Drums/Bass/Vocals/Rest, einzeln/parallel)."""
+        if self._rec_audio is None:
+            return
+        if not core.demucs_available():
+            messagebox.showinfo(
+                "Stem-Trennung nicht verfügbar",
+                "Dafür wird das lokale KI-Modell 'demucs' benötigt.\n\n"
+                "Installieren mit:\n    pip install demucs\n\n"
+                "(zieht PyTorch nach). Danach erneut versuchen.")
+            return
+        self._rec_info.config(
+            text="Trenne Aufnahme in Stems (KI, lokal) … kann einige Minuten dauern.")
+        rec, sr = self._rec_audio, self._rec_sr
+        threading.Thread(target=self._rec_stems_thread, args=(rec, sr),
+                         daemon=True).start()
+
+    def _rec_stems_thread(self, rec, sr):
+        try:
+            stems, ssr = core.separate_stems_array(rec, sr, model="htdemucs")
+            self._rec_stems_res = (stems, ssr, None)
+        except Exception as e:
+            self._rec_stems_res = (None, 0, str(e))
+
+    def _open_stem_player(self, stems_dict, sr):
+        """Fenster mit Pegel-Fadern je Stem + Play/Pause; spielt die getrennten
+        Spuren einzeln oder parallel (eigener StemPlayer)."""
+        names = ([n for n in core.STEM_NAMES if n in stems_dict]
+                 + [n for n in stems_dict if n not in core.STEM_NAMES])
+        stem_list = [stems_dict[n] for n in names]
+        try:
+            player = core.StemPlayer(stem_list, sr, names=names)
+            player.start_stream()
+        except Exception as e:
+            messagebox.showerror("Stems abspielen", f"Wiedergabe fehlgeschlagen:\n{e}")
+            return
+        self._stem_players.append(player)
+        win = tk.Toplevel(self.root)
+        win.title("Stems abspielen")
+        win.configure(bg=COL_BG)
+        win.transient(self.root)
+        tk.Label(win, text="Stems abspielen", font=self.f_h1, bg=COL_BG,
+                 fg=COL_FG).pack(pady=(12, 2))
+        tk.Label(win, text="Pegel je Spur (live) · Doppelklick = 1.0",
+                 font=self.f_tiny, bg=COL_BG, fg=COL_MUTED).pack(pady=(0, 8))
+        body = tk.Frame(win, bg=COL_BG)
+        body.pack(padx=20, pady=6)
+        for k, nm in enumerate(names):
+            col = tk.Frame(body, bg=COL_BG)
+            col.pack(side="left", padx=12)
+            vl = tk.Label(col, text="1.0", font=self.f_tiny, bg=COL_BG, fg=COL_FG)
+            vl.pack()
+            var = tk.DoubleVar(value=1.0)
+            sc = tk.Scale(col, from_=1.5, to=0.0, resolution=0.01, orient="vertical",
+                          variable=var, showvalue=False, length=150,
+                          command=lambda val, kk=k, lab=vl: (
+                              player.set_gain(kk, float(val)),
+                              lab.config(text=f"{float(val):.1f}")),
+                          bg=COL_BG, fg=COL_FG, troughcolor=COL_SURFACE,
+                          highlightthickness=0, bd=0, sliderrelief="flat",
+                          activebackground=COL_OK, width=16)
+            sc.pack()
+            sc.bind("<Double-Button-1>",
+                    lambda e, v=var, kk=k, lab=vl: (v.set(1.0),
+                                                    player.set_gain(kk, 1.0),
+                                                    lab.config(text="1.0"), "break")[-1])
+            tk.Label(col, text=core.STEM_LABELS.get(nm, nm), font=self.f_small,
+                     bg=COL_BG, fg=COL_ACCENT).pack()
+        ctl = tk.Frame(win, bg=COL_BG)
+        ctl.pack(pady=10)
+        playbtn = tk.Button(ctl, text="▶", font=self.f_btn, bg=COL_SURFACE,
+                            fg=COL_FG, activebackground=COL_SURF_HI,
+                            activeforeground=COL_FG, bd=0, padx=20, pady=6,
+                            highlightthickness=0, cursor="hand2")
+        playbtn.pack(side="left", padx=(0, 12))
+        poslbl = tk.Label(ctl, text="0:00 / 0:00", font=self.f_small, bg=COL_BG,
+                          fg=COL_MUTED)
+        poslbl.pack(side="left")
+        playbtn.config(command=lambda: playbtn.config(
+            text="⏸" if player.toggle() else "▶"))
+
+        def _upd():
+            if not win.winfo_exists():
+                return
+            pos, total = player.position()
+            poslbl.config(text=f"{self._fmt_pos(pos)} / {self._fmt_pos(total)}")
+            playbtn.config(text="⏸" if player.is_playing() else "▶")
+            win.after(200, _upd)
+
+        def _close():
+            try:
+                player.stop()
+            except Exception:
+                pass
+            if player in self._stem_players:
+                self._stem_players.remove(player)
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _close)
+        self._small_button(win, "Schließen", _close).pack(pady=8)
+        _upd()
 
     def _segment_rec_thread(self):
         rec, sr = self._rec_audio, self._rec_sr
@@ -1832,6 +1939,12 @@ class DisplayApp:
             self.stop_session()
         except Exception:
             pass
+        for p in list(self._stem_players):    # offene Stem-Player schliessen
+            try:
+                p.stop()
+            except Exception:
+                pass
+        self._stem_players = []
         self.app_stop.set()
         if self.analysis_thread is not None:
             self.analysis_thread.join(timeout=1.0)
@@ -1844,6 +1957,18 @@ class DisplayApp:
     # Anzeige-Aktualisierung (~6x pro Sekunde)
     # ------------------------------------------------------------------
     def _tick(self):
+        # Aufnahme->Stems fertig? -> Stem-Player oeffnen
+        if self._rec_stems_res is not None:
+            stems, ssr, err = self._rec_stems_res
+            self._rec_stems_res = None
+            if err:
+                messagebox.showerror("Stem-Trennung fehlgeschlagen", str(err))
+            elif stems:
+                try:
+                    self._rec_info.config(text="Stems bereit – im Stem-Player abspielbar.")
+                except Exception:
+                    pass
+                self._open_stem_player(stems, ssr)
         # Stems-Export fertig? (Hintergrund-Thread -> Anzeige im Setup)
         if self._stems_export_res is not None:
             paths, err = self._stems_export_res

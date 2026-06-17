@@ -2950,6 +2950,113 @@ def separate_stems_to_files(path, out_dir, model="htdemucs", base=None):
     return written
 
 
+def separate_stems_array(audio, sr, model="htdemucs"):
+    """Wie separate_stems, aber fuer ein In-Memory-Signal (z. B. eine Aufnahme):
+    schreibt eine Temp-WAV und trennt diese. Rueckgabe (dict, sr)."""
+    if sf is None:
+        raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        sf.write(tmp, np.asarray(audio, dtype=np.float32), int(sr), subtype='PCM_16')
+        return separate_stems(tmp, model)
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+class StemPlayer:
+    """Spielt mehrere Stem-Spuren gemischt ab -- Pegel je Spur live regelbar,
+    eigener sounddevice-OutputStream (unabhaengig vom DJ-Modus). Fuer den
+    Aufnahme->Stems-Ablauf."""
+
+    def __init__(self, stems, sr, names=None, device=None, blocksize=1024):
+        self.sr = int(sr)
+        self.device = device
+        self.blocksize = int(blocksize)
+        prepared = []
+        for s in stems:
+            a = np.asarray(s, dtype=np.float32)
+            if a.ndim == 1:
+                a = a.reshape(-1, 1)
+            prepared.append(a)
+        self.channels = max(1, min(2, max((a.shape[1] for a in prepared), default=1)))
+        adj = []
+        for a in prepared:
+            if a.shape[1] == 1 and self.channels == 2:
+                a = np.repeat(a, 2, axis=1)
+            elif a.shape[1] > self.channels:
+                a = a[:, :self.channels]
+            adj.append(np.ascontiguousarray(a, dtype=np.float32))
+        self.stems = adj
+        self.names = list(names) if names else [f"Stem {i+1}" for i in range(len(adj))]
+        self.total = min((a.shape[0] for a in self.stems), default=0)
+        self.gain = [1.0] * len(self.stems)
+        self.pos = 0
+        self.playing = False
+        self.stream = None
+        self.lock = threading.Lock()
+
+    def _callback(self, outdata, frames, time_info, status):
+        with self.lock:
+            out = np.zeros((frames, self.channels), dtype=np.float32)
+            if self.playing and self.pos < self.total:
+                s = self.pos
+                e = min(s + frames, self.total)
+                n = e - s
+                for k, a in enumerate(self.stems):
+                    out[:n] += a[s:e] * self.gain[k]
+                self.pos = e
+                if self.pos >= self.total:
+                    self.playing = False
+            outdata[:] = out
+
+    def start_stream(self):
+        if sd is None:
+            raise RuntimeError("sounddevice nicht verfuegbar")
+        self.stream = sd.OutputStream(
+            samplerate=self.sr, channels=self.channels, blocksize=self.blocksize,
+            device=self.device, dtype='float32', callback=self._callback)
+        self.stream.start()
+
+    def toggle(self):
+        with self.lock:
+            if self.playing:
+                self.playing = False
+            else:
+                if self.pos >= self.total:
+                    self.pos = 0
+                self.playing = True
+            return self.playing
+
+    def set_gain(self, k, g):
+        with self.lock:
+            if 0 <= k < len(self.gain):
+                self.gain[k] = float(max(0.0, g))
+
+    def position(self):
+        with self.lock:
+            return self.pos / float(self.sr), self.total / float(self.sr)
+
+    def is_playing(self):
+        with self.lock:
+            return self.playing
+
+    def stop(self):
+        with self.lock:
+            self.playing = False
+        st, self.stream = self.stream, None
+        if st is not None:
+            try:
+                st.stop()
+                st.close()
+            except Exception:
+                pass
+
+
 # ===========================================================================
 # DJ-Modus: zwei Decks, Equal-Power-Crossfade, Clock folgt dem Ziel-Deck
 # ===========================================================================
