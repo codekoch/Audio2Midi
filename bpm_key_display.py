@@ -1192,19 +1192,28 @@ class DisplayApp:
         eqf = tk.Frame(panel, bg=COL_SURFACE)
         eqf.pack(pady=(0, 10))
         w["eqvar"] = []
+        w["eqval"] = []
         for bi, nm in enumerate(("Bass", "Mitte", "Höhen")):
             col = tk.Frame(eqf, bg=COL_SURFACE)
             col.pack(side="left", padx=10)
+            val = tk.Label(col, text="0", font=self.f_tiny, bg=COL_SURFACE,
+                           fg=COL_FG)          # kleiner Wert ueber dem Fader
+            val.pack()
             v = tk.DoubleVar(value=0.0)
-            tk.Scale(col, from_=6, to=-40, resolution=1, orient="vertical",
-                     variable=v, showvalue=False, length=96,
-                     command=lambda _val, i=idx: self._dj_eq_change(i),
-                     bg=COL_SURFACE, fg=COL_FG, troughcolor=COL_BG,
-                     highlightthickness=0, bd=0, sliderrelief="flat",
-                     activebackground=COL_OK, width=14).pack()
+            sc = tk.Scale(col, from_=6, to=-40, resolution=1, orient="vertical",
+                          variable=v, showvalue=False, length=90,
+                          command=lambda _val, i=idx: self._dj_eq_change(i),
+                          bg=COL_SURFACE, fg=COL_FG, troughcolor=COL_BG,
+                          highlightthickness=0, bd=0, sliderrelief="flat",
+                          activebackground=COL_OK, width=14)
+            sc.pack()
+            # Doppelklick -> auf den Ausgangswert (0 dB) zuruecksetzen
+            sc.bind("<Double-Button-1>",
+                    lambda e, var=v, i=idx: self._dj_eq_reset(i, var))
             tk.Label(col, text=nm, font=self.f_tiny, bg=COL_SURFACE,
                      fg=COL_MUTED).pack()
             w["eqvar"].append(v)
+            w["eqval"].append(val)
         # Klick aufs Deck (Anzeigebereich) blendet hierher
         for el in (panel, head, w["name"], w["bpm"], w["key"], w["pos"]):
             el.bind("<Button-1>", lambda e, i=idx: self._dj_fade(i))
@@ -1308,11 +1317,19 @@ class DisplayApp:
         self.dj_engine.set_glide(idx)
 
     def _dj_eq_change(self, idx):
-        """EQ-Slider eines Decks anwenden (Bass/Mitte/Höhen, dB)."""
-        if self.dj_engine is None:
-            return
-        v = self.dj_w[idx]["eqvar"]
-        self.dj_engine.set_eq(idx, v[0].get(), v[1].get(), v[2].get())
+        """EQ-Slider eines Decks anwenden (Bass/Mitte/Höhen, dB) + Werte anzeigen."""
+        w = self.dj_w[idx]
+        v = w["eqvar"]
+        for k, lbl in enumerate(w.get("eqval", [])):
+            lbl.config(text=f"{int(round(v[k].get()))}")
+        if self.dj_engine is not None:
+            self.dj_engine.set_eq(idx, v[0].get(), v[1].get(), v[2].get())
+
+    def _dj_eq_reset(self, idx, var):
+        """Doppelklick auf einen EQ-Fader: zurueck auf 0 dB (neutral)."""
+        var.set(0.0)
+        self._dj_eq_change(idx)
+        return "break"
 
     def _dj_load(self, idx):
         path = filedialog.askopenfilename(

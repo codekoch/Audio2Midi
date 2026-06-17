@@ -211,7 +211,9 @@ zu dem übergeblendet wird.
   Songtempo; mit „Sync" (siehe unten) bleibt es konstant.
 - **EQ-Isolator:** Je Deck lassen sich **Bass / Mitte / Höhen** über drei
   **senkrechte Slider** stufenlos regeln (von +6 dB bis praktisch aus –
-  z. B. den Bass herunterziehen, während übergeblendet wird). Das ist schlanke
+  z. B. den Bass herunterziehen, während übergeblendet wird; der aktuelle
+  dB-Wert steht klein über dem Fader, **Doppelklick** setzt auf 0 dB zurück).
+  Das ist schlanke
   Frequenzfilterung (native `BiquadFilterNode`-Kette), **kein** echtes
   Heraustrennen einzelner Instrumente.
 - **Sync (Tempo-Match):** Per **„Sync"** rastet ein Deck **tonhöhen-erhaltend**

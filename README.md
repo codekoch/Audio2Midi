@@ -72,9 +72,9 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   Tempowechsel beim Überblenden inklusive). In der GUI über die Schaltfläche „DJ",
   in der Konsole über `--dj DATEI_A DATEI_B` (Tasten `a`/`b` zum Überblenden).
   Mirror der Webversion. Je Deck gibt es zusätzlich einen **EQ-Isolator**
-  (Bass/Mitte/Höhen stufenlos über senkrechte Slider regeln – echtzeitfähige
-  Frequenzfilterung als schlanker Stem-Ersatz, kein echtes Trennen einzelner
-  Instrumente) und einen
+  (Bass/Mitte/Höhen stufenlos über senkrechte Slider regeln, mit dB-Wertanzeige
+  und Doppelklick = zurück auf 0 dB – echtzeitfähige Frequenzfilterung als
+  schlanker Stem-Ersatz, kein echtes Trennen einzelner Instrumente) und einen
   **Tempo-Sync** („Sync"): das Deck rastet **tonhöhen-erhaltend** auf das Tempo
   des anderen Decks ein (Beat-Phasen-Ausrichtung; die MIDI-Clock bleibt beim
   Überblenden konstant). Die Zeitdehnung läuft **in Echtzeit** (WSOLA, in der

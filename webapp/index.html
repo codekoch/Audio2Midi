@@ -146,6 +146,7 @@ main {
 .dj .deckbtns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
 .dj .deckeq { display: flex; gap: 22px; justify-content: center; align-items: flex-end; margin-top: 10px; }
 .dj .eqband { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.dj .eqband .eqval { font-size: 10px; color: var(--fg); min-width: 2.4em; text-align: center; }
 .dj .eqsl { writing-mode: vertical-lr; direction: rtl; width: 8px; height: 96px; accent-color: var(--ok); cursor: pointer; }
 .dj .xfade { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-width: 120px; }
 .dj .xfade input[type="range"] { width: 110px; accent-color: var(--accent); }
@@ -370,9 +371,9 @@ main.djmode .sv { display: none !important; }   /* Einzeltrack-Anzeige im DJ-Mod
           <button class="ghost" id="djGlideA" disabled title="Tempo-Übergang: vom Master-Tempo aufs Eigentempo gleiten">Übergang</button>
         </div>
         <div class="deckeq">
-          <div class="eqband"><input type="range" class="eqsl" data-deck="0" data-band="0" min="-40" max="6" step="1" value="0"><span>Bass</span></div>
-          <div class="eqband"><input type="range" class="eqsl" data-deck="0" data-band="1" min="-40" max="6" step="1" value="0"><span>Mitte</span></div>
-          <div class="eqband"><input type="range" class="eqsl" data-deck="0" data-band="2" min="-40" max="6" step="1" value="0"><span>Höhen</span></div>
+          <div class="eqband"><span class="eqval">0</span><input type="range" class="eqsl" data-deck="0" data-band="0" min="-40" max="6" step="1" value="0" title="Doppelklick = 0 dB"><span>Bass</span></div>
+          <div class="eqband"><span class="eqval">0</span><input type="range" class="eqsl" data-deck="0" data-band="1" min="-40" max="6" step="1" value="0" title="Doppelklick = 0 dB"><span>Mitte</span></div>
+          <div class="eqband"><span class="eqval">0</span><input type="range" class="eqsl" data-deck="0" data-band="2" min="-40" max="6" step="1" value="0" title="Doppelklick = 0 dB"><span>Höhen</span></div>
         </div>
       </div>
       <div class="xfade">
@@ -394,9 +395,9 @@ main.djmode .sv { display: none !important; }   /* Einzeltrack-Anzeige im DJ-Mod
           <button class="ghost" id="djGlideB" disabled title="Tempo-Übergang: vom Master-Tempo aufs Eigentempo gleiten">Übergang</button>
         </div>
         <div class="deckeq">
-          <div class="eqband"><input type="range" class="eqsl" data-deck="1" data-band="0" min="-40" max="6" step="1" value="0"><span>Bass</span></div>
-          <div class="eqband"><input type="range" class="eqsl" data-deck="1" data-band="1" min="-40" max="6" step="1" value="0"><span>Mitte</span></div>
-          <div class="eqband"><input type="range" class="eqsl" data-deck="1" data-band="2" min="-40" max="6" step="1" value="0"><span>Höhen</span></div>
+          <div class="eqband"><span class="eqval">0</span><input type="range" class="eqsl" data-deck="1" data-band="0" min="-40" max="6" step="1" value="0" title="Doppelklick = 0 dB"><span>Bass</span></div>
+          <div class="eqband"><span class="eqval">0</span><input type="range" class="eqsl" data-deck="1" data-band="1" min="-40" max="6" step="1" value="0" title="Doppelklick = 0 dB"><span>Mitte</span></div>
+          <div class="eqband"><span class="eqval">0</span><input type="range" class="eqsl" data-deck="1" data-band="2" min="-40" max="6" step="1" value="0" title="Doppelklick = 0 dB"><span>Höhen</span></div>
         </div>
       </div>
       <input type="file" id="djFileInA" accept="audio/*" style="display:none">
@@ -3114,7 +3115,7 @@ function djTeardown() {
   djStopScheduler();
   djStop(0); djStop(1);
   if (djCtx) { try { djCtx.close(); } catch (e) {} djCtx = null; }
-  document.querySelectorAll('.eqsl').forEach(sl => { sl.value = 0; });
+  document.querySelectorAll('.eqsl').forEach(sl => { sl.value = 0; const r = sl.parentElement.querySelector('.eqval'); if (r) r.textContent = '0'; });
   for (let i = 0; i < 2; i++) {
     const d = djDecks[i];
     d.buffer = null; d.ticks = null; d.beats = null; d.tempoInfo = null; d.key = '';
@@ -3443,9 +3444,12 @@ $('djFileA').addEventListener('click', (e) => e.stopPropagation());
 $('djFileB').addEventListener('click', (e) => e.stopPropagation());
 elDjToA.addEventListener('click', () => djFadeTo(0));
 elDjToB.addEventListener('click', () => djFadeTo(1));
-document.querySelectorAll('.eqsl').forEach(sl => sl.addEventListener('input', (e) => {
-  e.stopPropagation(); djSetEqBand(+sl.dataset.deck, +sl.dataset.band, +sl.value);
-}));
+document.querySelectorAll('.eqsl').forEach(sl => {
+  const readout = sl.parentElement.querySelector('.eqval');
+  const apply = () => { djSetEqBand(+sl.dataset.deck, +sl.dataset.band, +sl.value); if (readout) readout.textContent = sl.value; };
+  sl.addEventListener('input', (e) => { e.stopPropagation(); apply(); });
+  sl.addEventListener('dblclick', (e) => { e.stopPropagation(); sl.value = 0; apply(); });   // Doppelklick -> 0 dB
+});
 $('djSyncA').addEventListener('click', () => djSyncSet(0, !djDecks[0].synced));
 $('djSyncB').addEventListener('click', () => djSyncSet(1, !djDecks[1].synced));
 $('djGlideA').addEventListener('click', () => djGlideSet(0));
