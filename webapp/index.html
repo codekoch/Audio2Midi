@@ -1312,8 +1312,9 @@ function djDeckState() {
     source: null, gain: null, analyser: null, timeBuf: null,
     startCtxTime: 0, nextTickIdx: 0, playing: false,
     eqGain: [0, 0, 0], eqLo: null, eqMid: null, eqHi: null,  // EQ (dB je Band)
-    origBuffer: null, origTicks: null, origBeats: null, nativeBpm: 0,  // Tempo-Sync
-    synced: false, syncRatio: 1, syncPending: false, gliding: false,
+    origBuffer: null, origTicks: null, origBeats: null, nativeBpm: 0,  // Tempo-Sync/-Glide (Echtzeit)
+    synced: false, syncRatio: 1, gliding: false,
+    stretchNode: null, srcStartSec: 0, tempoRate: 1, glideInfo: null,
     bpmEl: null, keyEl: null, posEl: null, lvlBar: null, nameEl: null, playBtn: null, syncBtn: null, glideBtn: null, deckEl: null };
 }
 
@@ -2751,49 +2752,62 @@ function resetFileMode() {
 // (getOutputTimestamp -> driftfrei). Beim Faden uebernimmt die Clock das andere
 // Deck. Beide Decks koennen gleichzeitig laufen (echtes Crossfaden).
 // ===========================================================================
-// Tonhoehen-erhaltende Zeitdehnung (Phase-Vocoder, offline). rate>1 -> kuerzer/
-// schneller (hoeheres Tempo), Tonhoehe bleibt erhalten. Laeuft asynchron mit
-// Yields, damit die Oberflaeche nicht einfriert. Liefert einen neuen AudioBuffer.
-async function pvTimeStretch(ctx, buffer, rate, onProgress) {
-  if (Math.abs(rate - 1) < 1e-3) return buffer;
-  const sr = buffer.sampleRate, nCh = buffer.numberOfChannels;
-  const N = 2048, Ha = 512, Hs = Math.max(1, Math.round(Ha / rate));
-  const win = new Float32Array(N);
-  for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
-  const inLen = buffer.length;
-  const nFrames = Math.max(1, Math.floor((inLen - N) / Ha) + 1);
-  const outLen = Math.floor((nFrames - 1) * Hs) + N + 1;
-  const fft = new FFT(N);
-  const out = ctx.createBuffer(nCh, outLen, sr);
-  const re = new Float32Array(N), im = new Float32Array(N);
-  const expct = 2 * Math.PI * Ha / N;
-  for (let c = 0; c < nCh; c++) {
-    const x = buffer.getChannelData(c), y = out.getChannelData(c);
-    const norm = new Float32Array(outLen);
-    const lastPhase = new Float32Array(N / 2 + 1), sumPhase = new Float32Array(N / 2 + 1);
-    let outPos = 0;
-    for (let f = 0; f < nFrames; f++) {
-      const inOff = f * Ha;
-      for (let i = 0; i < N; i++) { const s = inOff + i; re[i] = (s < inLen ? x[s] : 0) * win[i]; im[i] = 0; }
-      fft.transform(re, im);
-      for (let k = 0; k <= N / 2; k++) {
-        const mag = Math.hypot(re[k], im[k]);
-        const phase = Math.atan2(im[k], re[k]);
-        let dphi = phase - lastPhase[k] - k * expct; lastPhase[k] = phase;
-        dphi = ((dphi + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
-        sumPhase[k] += (k * expct + dphi) * (Hs / Ha);
-        re[k] = mag * Math.cos(sumPhase[k]); im[k] = mag * Math.sin(sumPhase[k]);
-      }
-      for (let k = 1; k < N / 2; k++) { re[N - k] = re[k]; im[N - k] = -im[k]; }   // Hermitesch
-      for (let k = 0; k < N; k++) im[k] = -im[k];                                  // inverse per Konjugation
-      fft.transform(re, im);
-      for (let i = 0; i < N; i++) { const o = outPos + i; if (o < outLen) { y[o] += (re[i] / N) * win[i]; norm[o] += win[i] * win[i]; } }
-      outPos += Hs;
-      if ((f & 255) === 0) { if (onProgress) onProgress(f / nFrames); await new Promise(r => setTimeout(r, 0)); }
-    }
-    for (let i = 0; i < outLen; i++) if (norm[i] > 1e-6) y[i] /= norm[i];
+// Echtzeit-Zeitdehnung (WSOLA) als AudioWorklet -- tonhoehen-erhaltend, sofort
+// wirksam (kein Vorberechnen). Der Prozessor liest die Quelle (Float32 je Kanal)
+// und gibt sie zeitgedehnt aus; Rate (auch ein Glide r0->r1) kommt per Nachricht.
+const DJ_WSOLA_CODE = `
+class WSOLAProcessor extends AudioWorkletProcessor {
+  constructor(opts){
+    super();
+    const o = opts.processorOptions || {};
+    this.x = o.channels || []; this.nch = this.x.length; this.N = this.nch ? this.x[0].length : 0;
+    this.frame = 2048; this.Hs = 512; this.search = 200;
+    this.win = new Float32Array(this.frame);
+    for (let i=0;i<this.frame;i++) this.win[i] = 0.5 - 0.5*Math.cos(2*Math.PI*i/(this.frame-1));
+    this.mono = new Float32Array(this.N);
+    for (let i=0;i<this.N;i++){ let s=0; for(let c=0;c<this.nch;c++) s+=this.x[c][i]; this.mono[i]=s/Math.max(1,this.nch); }
+    this.rate = o.rate || 1.0; this.glide = null; this.processed = 0;
+    this.acc = []; for(let c=0;c<this.nch;c++) this.acc.push(new Float32Array(this.frame));
+    this.wacc = new Float32Array(this.frame);
+    this.lo = []; for(let c=0;c<this.nch;c++) this.lo.push(new Float32Array(0));
+    this.loLen = 0; this.finished = false;
+    const start = Math.max(0, Math.min((o.startFrame||0)|0, Math.max(0,this.N-this.frame)));
+    this.nominal = start; this.ia = start; this._place(start);
+    this.port.onmessage = (e)=>{ const d=e.data;
+      if (d.type==='rate'){ this.rate=Math.max(0.25,Math.min(4,d.value)); this.glide=null; }
+      else if (d.type==='glide'){ this.glide={r0:d.r0,r1:d.r1,dur:d.dur}; this.processed=0; this.rate=d.r0; } };
   }
-  return out;
+  _place(a){ for(let c=0;c<this.nch;c++){ const e=Math.min(this.N,a+this.frame); for(let i=a;i<e;i++) this.acc[c][i-a]+=this.x[c][i]*this.win[i-a]; } for(let i=0;i<this.frame;i++) this.wacc[i]+=this.win[i]; this.ia=a; }
+  _hop(){ const Hs=this.Hs, F=this.frame;
+    const chunk=[]; for(let c=0;c<this.nch;c++){ const ch=new Float32Array(Hs); for(let i=0;i<Hs;i++){ const w=this.wacc[i]>1e-6?this.wacc[i]:1e-6; ch[i]=this.acc[c][i]/w; } chunk.push(ch); }
+    for(let c=0;c<this.nch;c++){ this.acc[c].copyWithin(0,Hs); this.acc[c].fill(0,F-Hs); }
+    this.wacc.copyWithin(0,Hs); this.wacc.fill(0,F-Hs);
+    this.nominal += Hs*this.rate; let base=Math.round(this.nominal); const nat_a=this.ia+Hs; let d=0;
+    if (this.search>0 && nat_a>=0 && nat_a<=this.N-F){ const lo=Math.max(0,base-this.search), hi=Math.min(this.N-F,base+this.search);
+      if (hi>lo){ let best=-1e30,bd=0; for(let a=lo;a<=hi;a++){ let acc=0; for(let i=0;i<F;i++) acc+=this.mono[a+i]*this.mono[nat_a+i]; if(acc>best){best=acc;bd=a-base;} } d=bd; } }
+    let a=Math.max(0,Math.min(Math.max(0,this.N-F), base+d)); if (a>=this.N-F) this.finished=true; this._place(a);
+    for(let c=0;c<this.nch;c++){ const nb=new Float32Array(this.loLen+Hs); nb.set(this.lo[c].subarray(0,this.loLen)); nb.set(chunk[c],this.loLen); this.lo[c]=nb; } this.loLen+=Hs; }
+  process(inputs, outputs){ const out=outputs[0]; const n=out[0].length;
+    if (this.glide){ const t=this.processed/sampleRate; const f=this.glide.dur>0?Math.min(1,Math.max(0,t/this.glide.dur)):1; this.rate=this.glide.r0+(this.glide.r1-this.glide.r0)*f; }
+    while (this.loLen<n && !this.finished) this._hop();
+    const avail=Math.min(n,this.loLen);
+    for(let c=0;c<out.length;c++){ const src=this.lo[Math.min(c,this.nch-1)]; for(let i=0;i<avail;i++) out[c][i]=src[i]; for(let i=avail;i<n;i++) out[c][i]=0; }
+    if (avail>0){ for(let c=0;c<this.nch;c++) this.lo[c]=this.lo[c].slice(avail); this.loLen-=avail; }
+    this.processed += n;
+    if (this.finished && this.loLen<=0){ this.port.postMessage({type:'ended'}); return false; }
+    return true; }
+}
+registerProcessor('wsola', WSOLAProcessor);`;
+let djWorkletReady = false;
+async function djEnsureWorklet() {
+  if (djWorkletReady || !djCtx) return djWorkletReady;
+  try {
+    const url = URL.createObjectURL(new Blob([DJ_WSOLA_CODE], { type: 'application/javascript' }));
+    await djCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    djWorkletReady = true;
+  } catch (e) { setHint('Echtzeit-Tempo (AudioWorklet) nicht verfügbar: ' + e.message, true); }
+  return djWorkletReady;
 }
 
 function djEnsureCtx() {
@@ -2826,7 +2840,8 @@ async function djLoad(deckIdx, file) {
   // Originale fuer Tempo-Sync merken; Sync zuruecksetzen
   d.origBuffer = buf; d.origBeats = d.beats; d.origTicks = d.ticks;
   d.nativeBpm = res ? res.bpm : 0;
-  d.synced = false; d.syncRatio = 1; d.syncPending = false; d.gliding = false;
+  d.synced = false; d.syncRatio = 1; d.gliding = false;
+  d.stretchNode = null; d.tempoRate = 1; d.glideInfo = null; d.srcStartSec = 0;
   d.playBtn.disabled = false;
   if (d.syncBtn) d.syncBtn.disabled = false;
   if (d.glideBtn) d.glideBtn.disabled = false;
@@ -2863,6 +2878,7 @@ function djPlay(deckIdx) {
   } catch (e) { setHint('Deck ' + djDeckLetter(deckIdx) + ' Wiedergabe fehlgeschlagen: ' + e.message, true); return; }
   d.startCtxTime = djCtx.currentTime + FILE_LEAD_S;
   d.nextTickIdx = 0;
+  d.srcStartSec = 0; d.tempoRate = 1; d.glideInfo = null; d.stretchNode = null;
   d.source.onended = () => { if (d.playing) djStop(deckIdx); };
   try { d.source.start(d.startCtxTime); } catch (e) { return; }
   d.playing = true; d.playBtn.textContent = '⏸';
@@ -2872,13 +2888,15 @@ function djPlay(deckIdx) {
 function djStop(deckIdx) {
   const d = djDecks[deckIdx];
   if (d.source) { try { d.source.onended = null; d.source.stop(); } catch (e) {} try { d.source.disconnect(); } catch (e) {} d.source = null; }
+  if (d.stretchNode) { try { d.stretchNode.port.onmessage = null; d.stretchNode.disconnect(); } catch (e) {} d.stretchNode = null; }
+  d.synced = false; d.gliding = false; d.syncRatio = 1; d.tempoRate = 1; d.glideInfo = null;
   if (d.gain) { try { d.gain.disconnect(); } catch (e) {} d.gain = null; }
   for (const k of ['eqLo', 'eqMid', 'eqHi']) { if (d[k]) { try { d[k].disconnect(); } catch (e) {} d[k] = null; } }
   if (d.analyser) { try { d.analyser.disconnect(); } catch (e) {} d.analyser = null; }
   d.timeBuf = null; d.playing = false; d.nextTickIdx = 0;
   if (d.playBtn) d.playBtn.textContent = '▶';
   if (d.lvlBar) d.lvlBar.style.width = '0%';
-  djUpdateDeckStatic(deckIdx);
+  djUpdateDeckStatic(deckIdx); djUpdateSyncBtn(deckIdx); djUpdateGlideBtn(deckIdx);
   if (!djDecks[0].playing && !djDecks[1].playing) djStopScheduler();
 }
 function djAnyPlaying() { return djDecks[0].playing || djDecks[1].playing; }
@@ -2909,142 +2927,127 @@ function djSetEqBand(deckIdx, band, db) {
 function djUpdateSyncBtn(i) {
   const d = djDecks[i];
   if (!d.syncBtn) return;
-  d.syncBtn.classList.toggle('on', d.synced && !d.syncPending);
-  d.syncBtn.textContent = d.syncPending ? 'synct…' : (d.synced ? 'Sync ✓' : 'Sync');
+  d.syncBtn.classList.toggle('on', d.synced);
+  d.syncBtn.textContent = d.synced ? 'Sync ✓' : 'Sync';
   if (d.tempoInfo && d.bpmEl) {
     const m = djDecks[1 - i];
     const eff = (d.synced && m.nativeBpm) ? m.nativeBpm : d.nativeBpm;
     if (eff) { d.bpmEl.textContent = String(Math.round(eff)); d.bpmEl.classList.remove('idle'); }
   }
 }
-function djPhaseAlign(deckIdx, offS) {
+// Quellposition (s) so verschieben, dass die Beat-Phase aufs Master-Deck passt.
+// Eine Zeitdehnung bildet Beats auf Beats ab -> Ausrichten in der Quelle genuegt.
+function djPhaseAlign(deckIdx, srcSec, Pm) {
   const d = djDecks[deckIdx], m = djDecks[1 - deckIdx];
-  if (!djCtx || !m.playing || !m.tempoInfo || !d.beats || d.beats.length < 2 || !m.beats || m.beats.length < 2) return offS;
-  const P = 60 / m.tempoInfo.bpm;
+  if (!djCtx || !m.playing || !m.nativeBpm || !d.nativeBpm
+      || !d.origBeats || d.origBeats.length < 2 || !m.beats || m.beats.length < 2) return srcSec;
+  const P = 60 / d.nativeBpm;
   const mPos = djCtx.currentTime - m.startCtxTime;
-  const ph = (p, b0) => (((p - b0) / P) % 1 + 1) % 1;
-  let dphi = ph(mPos, m.beats[0]) - ph(offS, d.beats[0]);
-  dphi = ((dphi + 0.5) % 1 + 1) % 1 - 0.5;          // auf [-0.5, 0.5) Beats
-  return Math.max(0, offS + dphi * P);
+  const mPhase = (((mPos - m.beats[0]) / Pm) % 1 + 1) % 1;
+  const bPhase = (((srcSec - d.origBeats[0]) / P) % 1 + 1) % 1;
+  let dphi = (mPhase - bPhase + 0.5) % 1; dphi = (dphi + 1) % 1 - 0.5;
+  return Math.max(0, srcSec + dphi * P);
 }
-function djRestartSource(deckIdx, offset) {
+// Aktuelle Quellposition (s) eines Decks aus der Ausgabe-Position + Modus.
+function djSrcSec(d) {
+  if (!d.playing) return d.srcStartSec || 0;
+  const t = Math.max(0, djCtx.currentTime - d.startCtxTime);
+  if (d.stretchNode) {
+    if (d.glideInfo) { const g = d.glideInfo; const tc = Math.min(t, g.dur);
+      let c = g.r0 * tc + (g.r1 - g.r0) * tc * tc / (2 * g.dur); if (t > g.dur) c += g.r1 * (t - g.dur);
+      return (d.srcStartSec || 0) + c; }
+    return (d.srcStartSec || 0) + t * (d.tempoRate || 1);
+  }
+  return (d.srcStartSec || 0) + t;
+}
+// Ausgabe-Tickraster fuer den Glide (analytisch, wie Python _glide_ticks).
+function djGlideTicks(arr, src0, r0, r1, dur) {
+  if (!arr) return null;
+  const a = (r1 - r0) / (2 * dur), srcEnd = src0 + dur * (r0 + r1) / 2, out = [];
+  for (let i = 0; i < arr.length; i++) { const ts = arr[i]; if (ts < src0) continue;
+    if (ts <= srcEnd) { if (Math.abs(a) < 1e-12) out.push((ts - src0) / r0);
+      else { const disc = r0 * r0 + 4 * a * (ts - src0); out.push((-r0 + Math.sqrt(Math.max(0, disc))) / (2 * a)); } }
+    else out.push(dur + (ts - srcEnd) / r1); }
+  return Float64Array.from(out);
+}
+// Quelle eines spielenden Decks durch den Echtzeit-Stretcher (Worklet) ersetzen.
+// glide=null -> konstante Rate (Sync); glide={r0,r1,dur} -> Tempo-Uebergang.
+async function djStartStretch(deckIdx, srcSec, rate, glide) {
   const d = djDecks[deckIdx];
-  if (!d.eqLo) return;                               // EQ-Kette existiert nur, wenn gespielt wird
+  if (!d.origBuffer || !d.eqLo) return;              // EQ-Kette existiert nur beim Spielen
+  if (!(await djEnsureWorklet())) return;
+  if (d.source) { try { d.source.onended = null; d.source.stop(); } catch (e) {} try { d.source.disconnect(); } catch (e) {} d.source = null; }
+  if (d.stretchNode) { try { d.stretchNode.port.onmessage = null; d.stretchNode.disconnect(); } catch (e) {} d.stretchNode = null; }
+  const nCh = d.origBuffer.numberOfChannels;
+  const chans = []; for (let c = 0; c < nCh; c++) chans.push(d.origBuffer.getChannelData(c));
+  const node = new AudioWorkletNode(djCtx, 'wsola', {
+    numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [nCh],
+    processorOptions: { channels: chans, rate: glide ? glide.r0 : rate, startFrame: Math.floor(srcSec * djCtx.sampleRate) } });
+  if (glide) node.port.postMessage({ type: 'glide', r0: glide.r0, r1: glide.r1, dur: glide.dur });
+  node.port.onmessage = (e) => { if (e.data && e.data.type === 'ended' && d.playing) djStop(deckIdx); };
+  node.connect(d.eqLo);
+  d.stretchNode = node; d.srcStartSec = srcSec;
+  d.tempoRate = glide ? null : rate; d.glideInfo = glide || null;
+  d.startCtxTime = djCtx.currentTime;                // Ausgabe-Position 0 = jetzt
+  d.nextTickIdx = 0;                                 // ticks sind in Ausgabezeit ab 0
+}
+// Zurueck auf direkte Wiedergabe (BufferSource) ab Quellposition srcSec.
+function djResumeSource(deckIdx, srcSec) {
+  const d = djDecks[deckIdx];
+  if (!d.eqLo) return;
+  if (d.stretchNode) { try { d.stretchNode.port.onmessage = null; d.stretchNode.disconnect(); } catch (e) {} d.stretchNode = null; }
   if (d.source) { try { d.source.onended = null; d.source.stop(); } catch (e) {} try { d.source.disconnect(); } catch (e) {} }
-  d.source = djCtx.createBufferSource(); d.source.buffer = d.buffer;
-  d.source.connect(d.eqLo);                          // bestehende EQ->Gain->Ausgabe-Kette weiternutzen
+  d.source = djCtx.createBufferSource(); d.source.buffer = d.origBuffer; d.source.connect(d.eqLo);
   const startAt = djCtx.currentTime + 0.03;
-  d.startCtxTime = startAt - offset;
+  d.startCtxTime = startAt - srcSec;                 // Quellzeit = Ausgabezeit (Rate 1)
+  d.tempoRate = 1; d.glideInfo = null; d.srcStartSec = srcSec;
   let lo = 0, hi = d.ticks ? d.ticks.length : 0;
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (d.ticks[mid] < offset) lo = mid + 1; else hi = mid; }
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (d.ticks[mid] < srcSec) lo = mid + 1; else hi = mid; }
   d.nextTickIdx = lo;
   d.source.onended = () => { if (d.playing) djStop(deckIdx); };
-  try { d.source.start(startAt, Math.max(0, offset)); } catch (e) {}
+  try { d.source.start(startAt, Math.max(0, srcSec)); } catch (e) {}
 }
 async function djSyncSet(deckIdx, on) {
   const d = djDecks[deckIdx], m = djDecks[1 - deckIdx];
   if (on) {
     if (!d.origBuffer || !d.nativeBpm || !m.nativeBpm) { setHint('Sync braucht zwei geladene Decks mit Tempo.', true); return; }
     const r = m.nativeBpm / d.nativeBpm;
-    d.syncPending = true; djUpdateSyncBtn(deckIdx);
-    let stretched;
-    try { stretched = await pvTimeStretch(djCtx, d.origBuffer, r); }
-    catch (e) { d.syncPending = false; djUpdateSyncBtn(deckIdx); setHint('Sync fehlgeschlagen: ' + e.message, true); return; }
-    if (!d.syncPending) return;                       // inzwischen abgebrochen
-    const wasPlaying = d.playing;
-    const posOrig = wasPlaying ? Math.max(0, djCtx.currentTime - d.startCtxTime) : 0;
-    d.buffer = stretched;
-    d.beats = d.origBeats ? Float64Array.from(d.origBeats, t => t / r) : null;
-    d.ticks = d.origTicks ? Float64Array.from(d.origTicks, t => t / r) : null;
-    d.synced = true; d.syncRatio = r; d.syncPending = false;
-    let offS = posOrig / r;
-    offS = djPhaseAlign(deckIdx, offS);
-    if (wasPlaying) djRestartSource(deckIdx, offS);
-    djUpdateSyncBtn(deckIdx);
-    setHint('Deck ' + djDeckLetter(deckIdx) + ' synct auf ' + Math.round(m.nativeBpm) + ' BPM (tonhöhen-erhaltend).');
+    let srcSec = djPhaseAlign(deckIdx, djSrcSec(d), 60 / m.nativeBpm);
+    const filt = (arr) => arr ? Float64Array.from(Array.prototype.filter.call(arr, t => t >= srcSec), t => (t - srcSec) / r) : null;
+    d.ticks = filt(d.origTicks); d.beats = filt(d.origBeats);
+    d.synced = true; d.gliding = false; d.syncRatio = r;
+    if (d.playing) await djStartStretch(deckIdx, srcSec, r, null);
+    djUpdateSyncBtn(deckIdx); djUpdateGlideBtn(deckIdx);
+    setHint('Deck ' + djDeckLetter(deckIdx) + ' synct in Echtzeit auf ' + Math.round(m.nativeBpm) + ' BPM.');
   } else {
-    d.syncPending = false;
-    if (!d.synced) { djUpdateSyncBtn(deckIdx); return; }
-    const wasPlaying = d.playing;
-    const posS = wasPlaying ? Math.max(0, djCtx.currentTime - d.startCtxTime) : 0;
-    d.buffer = d.origBuffer; d.beats = d.origBeats; d.ticks = d.origTicks;
-    const offO = posS * d.syncRatio;
-    d.synced = false; d.syncRatio = 1;
-    if (wasPlaying) djRestartSource(deckIdx, offO);
-    djUpdateSyncBtn(deckIdx);
+    if (!d.synced && !d.gliding) { djUpdateSyncBtn(deckIdx); return; }
+    const srcSec = djSrcSec(d);
+    d.ticks = d.origTicks; d.beats = d.origBeats;
+    d.synced = false; d.gliding = false; d.syncRatio = 1;
+    if (d.playing) djResumeSource(deckIdx, srcSec);
+    else if (d.stretchNode) { try { d.stretchNode.disconnect(); } catch (e) {} d.stretchNode = null; }
+    djUpdateSyncBtn(deckIdx); djUpdateGlideBtn(deckIdx);
   }
 }
-// --- Tempo-Uebergang: B startet im Master-Tempo und gleitet aufs Eigentempo ---
-// Baut den Glide in den Puffer ein (stueckweise konstante Rate, Phase-Vocoder)
-// und rechnet die passenden Tick-Zeiten mit -> die Clock gleitet automatisch mit.
-async function pvGlide(ctx, orig, origTicks, origBeats, r0, r1, glideOut, srcStartSec, nseg) {
-  const sr = orig.sampleRate, nCh = orig.numberOfChannels, total = orig.length;
-  const outChunk = glideOut / nseg, xn = Math.max(1, Math.round(0.005 * sr));
-  const srcKnot = [srcStartSec], outKnot = [0];
-  const chunks = [];
-  let srcF = Math.floor(srcStartSec * sr), outAcc = 0;
-  for (let k = 0; k < nseg; k++) {
-    const r = r0 + (r1 - r0) * (k + 0.5) / nseg;
-    let srcLen = Math.round(outChunk * r * sr);
-    if (srcF + srcLen > total) srcLen = total - srcF;
-    if (srcLen < 64) break;
-    const sub = ctx.createBuffer(nCh, srcLen, sr);
-    for (let c = 0; c < nCh; c++) sub.getChannelData(c).set(orig.getChannelData(c).subarray(srcF, srcF + srcLen));
-    const st = await pvTimeStretch(ctx, sub, r);
-    const add = chunks.length === 0 ? st.length : (st.length - xn);
-    chunks.push(st); srcF += srcLen; outAcc += add / sr;
-    srcKnot.push(srcF / sr); outKnot.push(outAcc);
-  }
-  const restLen = Math.max(0, total - srcF);
-  let glideLen = 0; chunks.forEach((b, i) => glideLen += (i === 0 ? b.length : b.length - xn));
-  const outLen = Math.max(1, glideLen + restLen);
-  const out = ctx.createBuffer(nCh, outLen, sr);
-  for (let c = 0; c < nCh; c++) {
-    const o = out.getChannelData(c); let p = 0;
-    chunks.forEach((b, i) => {
-      const cd = b.getChannelData(c);
-      if (i === 0) { o.set(cd, 0); p = b.length; }
-      else { for (let j = 0; j < xn; j++) { const w = j / xn; o[p - xn + j] = o[p - xn + j] * (1 - w) + cd[j] * w; } o.set(cd.subarray(xn), p); p += b.length - xn; }
-    });
-    if (restLen > 0) o.set(orig.getChannelData(c).subarray(srcF), p);
-  }
-  const gSrcEnd = srcKnot[srcKnot.length - 1], gOutEnd = outKnot[outKnot.length - 1];
-  const mapArr = (arr) => {
-    if (!arr) return null; const res = [];
-    for (let i = 0; i < arr.length; i++) {
-      const ts = arr[i]; if (ts < srcKnot[0]) continue;
-      if (ts >= gSrcEnd) { res.push(gOutEnd + (ts - gSrcEnd)); continue; }
-      let lo = 0, hi = srcKnot.length - 1; while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (srcKnot[mid] <= ts) lo = mid; else hi = mid; }
-      const f = (ts - srcKnot[lo]) / (srcKnot[lo + 1] - srcKnot[lo]);
-      res.push(outKnot[lo] + f * (outKnot[lo + 1] - outKnot[lo]));
-    }
-    return Float64Array.from(res);
-  };
-  return { buffer: out, ticks: mapArr(origTicks), beats: mapArr(origBeats) };
-}
+// --- Tempo-Uebergang (Echtzeit): B startet im Master-Tempo und gleitet aufs
+// Eigentempo. Der Worklet rampt die Rate; die analytischen Tick-Zeiten lassen
+// die Clock automatisch mitgleiten.
 function djUpdateGlideBtn(i) {
   const d = djDecks[i]; if (!d.glideBtn) return;
-  d.glideBtn.classList.toggle('on', d.gliding && !d.syncPending);
-  d.glideBtn.textContent = d.syncPending ? 'rechnet…' : (d.gliding ? 'Übergang ✓' : 'Übergang');
+  d.glideBtn.classList.toggle('on', d.gliding);
+  d.glideBtn.textContent = d.gliding ? 'Übergang ✓' : 'Übergang';
 }
 async function djGlideSet(deckIdx) {
   const d = djDecks[deckIdx], m = djDecks[1 - deckIdx];
   if (!d.origBuffer || !d.nativeBpm || !m.nativeBpm) { setHint('Übergang braucht zwei geladene Decks mit Tempo.', true); return; }
-  if (d.syncPending) return;
-  const r0 = m.nativeBpm / d.nativeBpm, r1 = 1.0;
-  const wasPlaying = d.playing;
-  const posAct = wasPlaying ? Math.max(0, djCtx.currentTime - d.startCtxTime) : 0;
-  const srcStartSec = d.synced ? posAct * d.syncRatio : posAct;
-  d.syncPending = true; djUpdateGlideBtn(deckIdx);
-  let res;
-  try { res = await pvGlide(djCtx, d.origBuffer, d.origTicks, d.origBeats, r0, r1, 8.0, srcStartSec, 12); }
-  catch (e) { d.syncPending = false; djUpdateGlideBtn(deckIdx); setHint('Übergang fehlgeschlagen: ' + e.message, true); return; }
-  if (!d.syncPending) return;
-  d.buffer = res.buffer; d.ticks = res.ticks; d.beats = res.beats;
-  d.synced = false; d.syncRatio = 1; d.gliding = true; d.syncPending = false;
-  if (wasPlaying) djRestartSource(deckIdx, 0);
+  const r0 = m.nativeBpm / d.nativeBpm, r1 = 1.0, dur = 8.0;
+  const srcSec = djPhaseAlign(deckIdx, djSrcSec(d), 60 / m.nativeBpm);
+  d.ticks = djGlideTicks(d.origTicks, srcSec, r0, r1, dur);
+  d.beats = djGlideTicks(d.origBeats, srcSec, r0, r1, dur);
+  d.synced = false; d.gliding = true; d.syncRatio = r0;
+  if (d.playing) await djStartStretch(deckIdx, srcSec, r0, { r0, r1, dur });
   djUpdateSyncBtn(deckIdx); djUpdateGlideBtn(deckIdx);
-  setHint('Deck ' + djDeckLetter(deckIdx) + ': Tempo-Übergang auf ' + Math.round(d.nativeBpm) + ' BPM.');
+  setHint('Deck ' + djDeckLetter(deckIdx) + ': Tempo-Übergang auf ' + Math.round(d.nativeBpm) + ' BPM (Echtzeit).');
 }
 function djFadeTo(deckIdx) {
   const d = djDecks[deckIdx];
@@ -3117,7 +3120,8 @@ function djTeardown() {
     d.buffer = null; d.ticks = null; d.beats = null; d.tempoInfo = null; d.key = '';
     d.eqGain = [0, 0, 0];
     d.origBuffer = null; d.origTicks = null; d.origBeats = null; d.nativeBpm = 0;
-    d.synced = false; d.syncRatio = 1; d.syncPending = false; d.gliding = false;
+    d.synced = false; d.syncRatio = 1; d.gliding = false;
+    d.stretchNode = null; d.tempoRate = 1; d.glideInfo = null; d.srcStartSec = 0;
     if (d.syncBtn) { d.syncBtn.disabled = true; d.syncBtn.classList.remove('on'); d.syncBtn.textContent = 'Sync'; }
     if (d.glideBtn) { d.glideBtn.disabled = true; d.glideBtn.classList.remove('on'); d.glideBtn.textContent = 'Übergang'; }
     if (d.nameEl) d.nameEl.textContent = 'keine Datei';
@@ -3442,8 +3446,8 @@ elDjToB.addEventListener('click', () => djFadeTo(1));
 document.querySelectorAll('.eqsl').forEach(sl => sl.addEventListener('input', (e) => {
   e.stopPropagation(); djSetEqBand(+sl.dataset.deck, +sl.dataset.band, +sl.value);
 }));
-$('djSyncA').addEventListener('click', () => djSyncSet(0, !djDecks[0].synced && !djDecks[0].syncPending));
-$('djSyncB').addEventListener('click', () => djSyncSet(1, !djDecks[1].synced && !djDecks[1].syncPending));
+$('djSyncA').addEventListener('click', () => djSyncSet(0, !djDecks[0].synced));
+$('djSyncB').addEventListener('click', () => djSyncSet(1, !djDecks[1].synced));
 $('djGlideA').addEventListener('click', () => djGlideSet(0));
 $('djGlideB').addEventListener('click', () => djGlideSet(1));
 elDjCross.addEventListener('input', () => { djCross = djCrossTarget = (+elDjCross.value) / 100; djApplyCross(); });

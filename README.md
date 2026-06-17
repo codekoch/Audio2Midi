@@ -77,11 +77,11 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   Instrumente) und einen
   **Tempo-Sync** („Sync"): das Deck rastet **tonhöhen-erhaltend** auf das Tempo
   des anderen Decks ein (Beat-Phasen-Ausrichtung; die MIDI-Clock bleibt beim
-  Überblenden konstant). Die Zeitdehnung wird vorab berechnet (Phase-Vocoder) –
-  bewusst offline statt in Echtzeit, damit es auch auf dem Raspberry Pi läuft.
-  Mit **„Übergang"** gleitet ein Deck stattdessen vom Master-Tempo allmählich auf
-  sein **Eigentempo** – der Tempowechsel wird in den Puffer eingebacken und die
-  MIDI-Clock gleitet automatisch mit.
+  Überblenden konstant). Die Zeitdehnung läuft **in Echtzeit** (WSOLA, in der
+  WebApp als AudioWorklet) und wirkt **sofort** – ohne Vorberechnung. Mit
+  **„Übergang"** gleitet ein Deck stattdessen vom Master-Tempo allmählich auf
+  sein **Eigentempo**; die WSOLA-Rate wird live gerampt und die MIDI-Clock
+  gleitet automatisch mit.
 - **Zwei Oberflächen** – Konsolen-Version (`realtime_bpm_key_midiclock.py`)
   und Touch-taugliche Kiosk-GUI (`bpm_key_display.py`) für ein 7-Zoll-Display
   am Raspberry Pi; unter Windows und macOS läuft sie im Fenster.

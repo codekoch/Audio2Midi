@@ -216,11 +216,11 @@ zu dem übergeblendet wird.
   Heraustrennen einzelner Instrumente.
 - **Sync (Tempo-Match):** Per **„Sync"** rastet ein Deck **tonhöhen-erhaltend**
   auf das Tempo des anderen Decks ein (mit Beat-Phasen-Ausrichtung). Die Clock
-  bleibt dann beim Überblenden konstant. Die Zeitdehnung wird einmal vorab
-  berechnet (Phase-Vocoder); bei langen Tracks dauert das einen Moment.
+  bleibt dann beim Überblenden konstant. Die Zeitdehnung läuft **in Echtzeit**
+  (WSOLA als AudioWorklet) und wirkt **sofort** – ohne Vorberechnung.
 - **Übergang (Tempo-Glide):** Mit **„Übergang"** gleitet ein Deck vom
-  Master-Tempo allmählich auf sein **Eigentempo** – der Tempowechsel wird in den
-  Puffer eingebacken, und die MIDI-Clock gleitet automatisch mit.
+  Master-Tempo allmählich auf sein **Eigentempo** – die Dehnungsrate wird live
+  gerampt, und die MIDI-Clock gleitet automatisch mit.
 
 Tipp: Den BPM-Bereich vor dem Laden grob passend setzen (steuert die Analyse).
 Den Tab im Vordergrund lassen.
