@@ -209,9 +209,10 @@ zu dem übergeblendet wird.
   die Clock dessen Tempo – das angeschlossene Gerät läuft also synchron zum
   gerade gehörten Track. Ohne „Sync" springt das Tempo beim Wechsel auf das neue
   Songtempo; mit „Sync" (siehe unten) bleibt es konstant.
-- **EQ-Isolator:** Je Deck lassen sich **Bass / Mitte / Höhen** einzeln
-  stummschalten (z. B. den Bass rausnehmen, während übergeblendet wird). Das ist
-  schlanke Frequenzfilterung (native `BiquadFilterNode`-Kette), **kein** echtes
+- **EQ-Isolator:** Je Deck lassen sich **Bass / Mitte / Höhen** über drei
+  **senkrechte Slider** stufenlos regeln (von +6 dB bis praktisch aus –
+  z. B. den Bass herunterziehen, während übergeblendet wird). Das ist schlanke
+  Frequenzfilterung (native `BiquadFilterNode`-Kette), **kein** echtes
   Heraustrennen einzelner Instrumente.
 - **Sync (Tempo-Match):** Per **„Sync"** rastet ein Deck **tonhöhen-erhaltend**
   auf das Tempo des anderen Decks ein (mit Beat-Phasen-Ausrichtung). Die Clock

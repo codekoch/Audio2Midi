@@ -1100,7 +1100,7 @@ class DisplayApp:
         win = tk.Toplevel(self.root)
         win.title("DJ-Modus")
         win.configure(bg=COL_BG)
-        win.geometry("760x540")
+        win.geometry("800x680")
         win.transient(self.root)
         win.protocol("WM_DELETE_WINDOW", self._dj_close)
         self.dj_win = win
@@ -1188,21 +1188,24 @@ class DisplayApp:
                                bd=0, padx=12, pady=4, highlightthickness=0,
                                cursor="hand2")
         w["glide"].pack(side="left", padx=4)
-        # EQ-Isolator: Baender killen (Bass/Mitte/Hoehen)
+        # EQ-Isolator: senkrechte Slider (Bass/Mitte/Höhen), kontinuierlich
+        # regelbar von +6 dB (oben) bis -40 dB (unten, praktisch aus).
         eqf = tk.Frame(panel, bg=COL_SURFACE)
-        eqf.pack(pady=(0, 12))
-        tk.Label(eqf, text="EQ", font=self.f_tiny, bg=COL_SURFACE,
-                 fg=COL_MUTED).pack(side="left", padx=(0, 6))
-        w["eq"] = [False, False, False]
-        w["eqbtn"] = []
+        eqf.pack(pady=(0, 10))
+        w["eqvar"] = []
         for bi, nm in enumerate(("Bass", "Mitte", "Höhen")):
-            b = tk.Button(eqf, text=nm, font=self.f_tiny, bg=COL_BG, fg=COL_FG,
-                          activebackground=COL_SURF_HI, activeforeground=COL_FG,
-                          bd=0, padx=10, pady=3, highlightthickness=0,
-                          cursor="hand2",
-                          command=lambda i=idx, band=bi: self._dj_eq_toggle(i, band))
-            b.pack(side="left", padx=2)
-            w["eqbtn"].append(b)
+            col = tk.Frame(eqf, bg=COL_SURFACE)
+            col.pack(side="left", padx=10)
+            v = tk.DoubleVar(value=0.0)
+            tk.Scale(col, from_=6, to=-40, resolution=1, orient="vertical",
+                     variable=v, showvalue=False, length=96,
+                     command=lambda _val, i=idx: self._dj_eq_change(i),
+                     bg=COL_SURFACE, fg=COL_FG, troughcolor=COL_BG,
+                     highlightthickness=0, bd=0, sliderrelief="flat",
+                     activebackground=COL_OK, width=14).pack()
+            tk.Label(col, text=nm, font=self.f_tiny, bg=COL_SURFACE,
+                     fg=COL_MUTED).pack()
+            w["eqvar"].append(v)
         # Klick aufs Deck (Anzeigebereich) blendet hierher
         for el in (panel, head, w["name"], w["bpm"], w["key"], w["pos"]):
             el.bind("<Button-1>", lambda e, i=idx: self._dj_fade(i))
@@ -1225,19 +1228,12 @@ class DisplayApp:
             return
         self.dj_engine.set_glide(idx)
 
-    def _dj_eq_toggle(self, idx, band):
-        """Ein EQ-Band des Decks killen/freigeben (Bass/Mitte/Höhen)."""
+    def _dj_eq_change(self, idx):
+        """EQ-Slider eines Decks anwenden (Bass/Mitte/Höhen, dB)."""
         if self.dj_engine is None:
             return
-        w = self.dj_w[idx]
-        w["eq"][band] = not w["eq"][band]
-        btn = w["eqbtn"][band]
-        if w["eq"][band]:
-            btn.config(bg=COL_WARN, fg="#412402")
-        else:
-            btn.config(bg=COL_BG, fg=COL_FG)
-        db = [core.DJ_EQ_KILL_DB if on else 0.0 for on in w["eq"]]
-        self.dj_engine.set_eq(idx, db[0], db[1], db[2])
+        v = self.dj_w[idx]["eqvar"]
+        self.dj_engine.set_eq(idx, v[0].get(), v[1].get(), v[2].get())
 
     def _dj_load(self, idx):
         path = filedialog.askopenfilename(
