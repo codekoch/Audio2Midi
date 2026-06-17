@@ -2859,76 +2859,105 @@ def _rbj_biquad(kind, f0, db, q, sr):
     return [b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]
 
 
-def _time_stretch_stereo(audio, rate):
-    """Tonhoehen-erhaltende Zeitdehnung eines (frames[,ch])-Puffers um 'rate'
-    (>1 = schneller/kuerzer = hoeheres Tempo), pro Kanal via librosa-Phase-
-    Vocoder. Tonhoehe bleibt erhalten (anders als reines Resampling)."""
-    a = np.asarray(audio, dtype=np.float32)
-    if a.ndim == 1:
-        a = a.reshape(-1, 1)
-    if abs(rate - 1.0) < 1e-4:
-        return np.ascontiguousarray(a, dtype=np.float32)
-    chans = [librosa.effects.time_stretch(np.ascontiguousarray(a[:, c]), rate=rate)
-             for c in range(a.shape[1])]
-    n = min(len(c) for c in chans)
-    return np.ascontiguousarray(np.column_stack([c[:n] for c in chans]),
-                                dtype=np.float32)
+class _WSOLA:
+    """Streaming-Zeitdehnung (WSOLA), tonhoehen-erhaltend und echtzeitfaehig.
+    pull(n) liefert n Ausgabesamples und verbraucht dabei ~n*rate Quellsamples
+    (rate>1 = schneller = hoeheres Tempo). Guenstig genug fuer den Audio-Callback.
+    Die Rate kann jederzeit gesetzt werden (auch fuer einen Tempo-Glide)."""
+
+    def __init__(self, audio, start_frame=0, frame=2048, hop=512, search=200):
+        a = np.asarray(audio, dtype=np.float32)
+        if a.ndim == 1:
+            a = a.reshape(-1, 1)
+        self.x = a
+        self.N, self.ch = a.shape
+        self.frame, self.Hs, self.search = frame, hop, search
+        self.win = np.hanning(frame).astype(np.float32)
+        self.xm = a.mean(axis=1).astype(np.float32)     # Mono fuer die Suche
+        self.rate = 1.0
+        self.acc = np.zeros((frame, self.ch), dtype=np.float32)
+        self.wacc = np.zeros(frame, dtype=np.float32)
+        self.out = np.zeros((0, self.ch), dtype=np.float32)
+        self.finished = False
+        start = max(0, min(int(start_frame), max(0, self.N - frame)))
+        self.nominal = float(start)
+        self._place(start)
+
+    def set_rate(self, r):
+        self.rate = float(max(0.25, min(4.0, r)))
+
+    def _frame_at(self, a):
+        seg = np.zeros((self.frame, self.ch), dtype=np.float32)
+        a = max(0, a)
+        e = min(self.N, a + self.frame)
+        if e > a:
+            seg[:e - a] = self.x[a:e]
+        return seg
+
+    def _place(self, a):
+        self.acc += self._frame_at(a) * self.win[:, None]
+        self.wacc += self.win
+        self.ia = a
+
+    def _hop(self):
+        w = np.maximum(self.wacc[:self.Hs], 1e-6)
+        chunk = (self.acc[:self.Hs] / w[:, None]).copy()
+        self.acc = np.roll(self.acc, -self.Hs, axis=0); self.acc[-self.Hs:] = 0
+        self.wacc = np.roll(self.wacc, -self.Hs); self.wacc[-self.Hs:] = 0
+        self.nominal += self.Hs * self.rate
+        base = int(round(self.nominal))
+        nat_a = self.ia + self.Hs                        # natuerliche Fortsetzung
+        d = 0
+        if self.search > 0 and 0 <= nat_a <= self.N - self.frame:
+            lo = max(0, base - self.search)
+            hi = min(self.N - self.frame, base + self.search)
+            if hi > lo:
+                nat = self.xm[nat_a:nat_a + self.frame]
+                region = self.xm[lo:hi + self.frame]
+                corr = np.correlate(region, nat, 'valid')
+                d = lo + int(np.argmax(corr)) - base
+        a = max(0, min(max(0, self.N - self.frame), base + d))
+        if a >= self.N - self.frame:
+            self.finished = True
+        self._place(a)
+        return chunk
+
+    def pull(self, n):
+        while self.out.shape[0] < n and not self.finished:
+            self.out = np.concatenate([self.out, self._hop()], axis=0)
+        if self.out.shape[0] >= n:
+            o = self.out[:n]
+            self.out = self.out[n:]
+            return o
+        o = np.zeros((n, self.ch), dtype=np.float32)
+        o[:self.out.shape[0]] = self.out
+        self.out = self.out[:0]
+        return o
 
 
-def _render_glide(orig_audio, sr, orig_ticks, orig_beats, r0, r1, glide_out,
-                  src_start, nseg=12):
-    """Baut einen Puffer, der ab Quellposition src_start (Frames) zunaechst ueber
-    glide_out Sekunden das Tempo von native*r0 nach native*r1 gleiten laesst
-    (stueckweise konstante Rate, tonhoehen-erhaltend) und danach unveraendert
-    weiterspielt. Liefert (audio, ticks, beats) mit Zeiten im Ausgaberaster.
-    Die Tick-Abbildung macht den anschliessenden Clock-Glide automatisch."""
-    orig = np.asarray(orig_audio, dtype=np.float32)
-    total = orig.shape[0]
-    out_chunk = glide_out / nseg
-    xn = max(1, int(0.005 * sr))
-    segs = []
-    src_knot = [src_start / sr]          # Quellzeit am Chunk-Anfang (s)
-    out_knot = [0.0]                     # Ausgabezeit am Chunk-Anfang (s)
-    src = src_start
-    out_acc = 0.0
-    for k in range(nseg):
-        r = r0 + (r1 - r0) * (k + 0.5) / nseg
-        src_len = int(round(out_chunk * r * sr))
-        if src + src_len > total:
-            src_len = total - src
-        if src_len < 32:
-            break
-        st = _time_stretch_stereo(orig[src:src + src_len], r)
-        if segs and len(segs[-1]) > xn and len(st) > xn:
-            w = np.linspace(0, 1, xn, dtype=np.float32)[:, None]
-            segs[-1][-xn:] = segs[-1][-xn:] * (1 - w) + st[:xn] * w
-            st = st[xn:]
-        segs.append(st)
-        src += src_len
-        out_acc += len(st) / sr
-        src_knot.append(src / sr)
-        out_knot.append(out_acc)
-    if src < total:
-        segs.append(orig[src:])          # Rest unveraendert (Rate 1)
-    glide_audio = (np.concatenate(segs) if segs
-                   else np.ascontiguousarray(orig[src_start:]))
-    src_knot = np.array(src_knot, dtype=np.float64)
-    out_knot = np.array(out_knot, dtype=np.float64)
-    glide_src_end, glide_out_end = src_knot[-1], out_knot[-1]
-
-    def map_arr(times):
-        if times is None:
-            return None
-        t = np.asarray(times, dtype=np.float64)
-        t = t[t >= src_knot[0]]
-        if len(t) == 0:
-            return np.array([], dtype=np.float64)
-        within = np.interp(t, src_knot, out_knot)        # Glide-Bereich
-        after = glide_out_end + (t - glide_src_end)       # Rest 1:1
-        return np.where(t >= glide_src_end, after, within)
-
-    return (np.ascontiguousarray(glide_audio, dtype=np.float32),
-            map_arr(orig_ticks), map_arr(orig_beats))
+def _glide_ticks(orig_ticks, src0_sec, r0, r1, glide_dur):
+    """Ausgabe-Zeit-Tickraster fuer den Tempo-Glide: die Rate gleitet in der
+    AUSGABEZEIT linear r0->r1 ueber glide_dur, danach konstant r1. Quelle->Ausgabe
+    wird analytisch invertiert (Quadratik), damit die Clock automatisch mitgleitet."""
+    if orig_ticks is None:
+        return None
+    t = np.asarray(orig_ticks, dtype=np.float64)
+    t = t[t >= src0_sec]
+    if len(t) == 0:
+        return np.array([], dtype=np.float64)
+    a = (r1 - r0) / (2.0 * glide_dur) if glide_dur > 0 else 0.0
+    src_glide_end = src0_sec + glide_dur * (r0 + r1) / 2.0
+    out = np.empty(len(t), dtype=np.float64)
+    for i, ts in enumerate(t):
+        if ts <= src_glide_end:
+            if abs(a) < 1e-12:
+                out[i] = (ts - src0_sec) / r0
+            else:
+                disc = r0 * r0 + 4.0 * a * (ts - src0_sec)
+                out[i] = (-r0 + math.sqrt(max(0.0, disc))) / (2.0 * a)
+        else:
+            out[i] = glide_dur + (ts - src_glide_end) / r1
+    return out
 
 
 def _dj_eq_sos(low_db, mid_db, high_db, sr=DJ_SR):
@@ -2959,15 +2988,20 @@ class DJDeck:
         self.eq_db = [0.0, 0.0, 0.0]   # Baender low/mid/high (dB; 0 = neutral)
         self.eq_sos = None             # Biquad-Kaskade oder None (neutral)
         self.eq_zi = None              # Filterzustand (Block-Kontinuitaet)
-        # Tempo-Sync (tonhoehen-erhaltend, vorab gedehnt):
+        # Tempo-Sync/-Glide (tonhoehen-erhaltend, ECHTZEIT via _WSOLA):
         self.native_bpm = 0.0          # Eigentempo des Stuecks
-        self.orig_audio = None         # ungedehnter Puffer (zum Zuruecksetzen)
+        self.orig_audio = None         # Originalpuffer (Quelle fuer den Stretcher)
         self.orig_beats = None
         self.orig_ticks = None
         self.synced = False            # spielt gerade im Master-Tempo?
-        self.sync_ratio = 1.0          # angewandte Dehnungsrate
-        self.sync_pending = False      # Hintergrund-Render laeuft?
-        self.gliding = False           # Tempo-Uebergang aktiv/abgespielt?
+        self.sync_ratio = 1.0          # aktuelle Dehnungsrate (Anzeige)
+        self.gliding = False           # Tempo-Uebergang laeuft?
+        self.stretcher = None          # _WSOLA, wenn Tempo veraendert wird
+        self.tempo_mode = "none"       # 'none' | 'sync' | 'glide'
+        self.glide_r0 = 1.0            # Start-/Zielrate + Startzeit (Ausgabe) des Glide
+        self.glide_r1 = 1.0
+        self.glide_t0 = 0.0
+        self.glide_dur = DJ_GLIDE_S
 
 
 class DJEngine:
@@ -3023,8 +3057,9 @@ class DJEngine:
             d.native_bpm = float(info["bpm"]) if info else 0.0
             d.synced = False
             d.sync_ratio = 1.0
-            d.sync_pending = False
             d.gliding = False
+            d.stretcher = None
+            d.tempo_mode = "none"
 
     def _callback(self, outdata, frames, time_info, status):
         with self.lock:
@@ -3038,7 +3073,23 @@ class DJEngine:
             gains = (math.cos(x * math.pi / 2), math.sin(x * math.pi / 2))
             out = np.zeros((frames, self.channels), dtype=np.float32)
             for i, d in enumerate(self.decks):
-                if d.playing and d.audio is not None:
+                if d.playing and d.stretcher is not None:
+                    # Tempo veraendert -> Echtzeit-Zeitdehnung. d.pos = AUSGABE-Frames.
+                    d.anchor_pos = d.pos
+                    d.anchor_perf = time.perf_counter()
+                    if d.tempo_mode == "glide":
+                        to = d.pos / float(DJ_SR) - d.glide_t0
+                        f = min(1.0, max(0.0, to / d.glide_dur)) if d.glide_dur > 0 else 1.0
+                        d.stretcher.set_rate(d.glide_r0 + (d.glide_r1 - d.glide_r0) * f)
+                    block = d.stretcher.pull(frames)
+                    if d.eq_sos is not None and _sps is not None:
+                        block = self._deck_eq(d, block)
+                    out += block * gains[i]
+                    d.level = float(np.sqrt(np.mean(block * block))) * gains[i]
+                    d.pos += frames
+                    if d.stretcher.finished and d.stretcher.out.shape[0] == 0:
+                        d.playing = False
+                elif d.playing and d.audio is not None:
                     d.anchor_pos = d.pos
                     d.anchor_perf = time.perf_counter()
                     s = d.pos
@@ -3074,126 +3125,114 @@ class DJEngine:
             d.eq_sos = sos
             d.eq_zi = None             # Zustand fuer die neue Kaskade zuruecksetzen
 
-    def _phase_align(self, idx):
-        """Beat-Phase von Deck idx auf das andere (Master-)Deck ziehen. Beide
-        laufen dann im selben Tempo und bleiben damit phasengleich."""
+    def _cur_src_sec(self, d):
+        """Aktuelle Quellposition (s): bei aktivem Stretcher dessen Leseposition,
+        sonst die direkte Ausgabeposition."""
+        with self.lock:
+            return (d.stretcher.ia / float(DJ_SR)) if d.stretcher is not None \
+                else (d.pos / float(DJ_SR))
+
+    def _phase_align_src(self, idx, src0, period_master):
+        """Quellposition src0 (s) so verschieben, dass die Beat-Phase von Deck idx
+        zur Beat-Phase des Master-Decks passt. Da eine Zeitdehnung Beats auf Beats
+        abbildet, ist die Beat-Phase erhalten -- Ausrichten in der Quelle genuegt."""
         d = self.decks[idx]
         m = self.decks[1 - idx]
-        if (d.beats is None or len(d.beats) < 2 or m.beats is None
-                or len(m.beats) < 2 or m.native_bpm <= 0 or not m.playing):
-            return
-        period = 60.0 / m.native_bpm
-        m_pos = self.play_pos(1 - idx)
-        with self.lock:
-            d_pos = d.pos / float(DJ_SR)
-            db0, mb0 = float(d.beats[0]), float(m.beats[0])
-        ph = lambda p, b0: (((p - b0) / period) % 1.0)
-        dphi = ph(m_pos, mb0) - ph(d_pos, db0)
-        dphi = (dphi + 0.5) % 1.0 - 0.5        # auf [-0.5, 0.5) Beats
-        shift = int(round(dphi * period * DJ_SR))
-        with self.lock:
-            d.pos = min(max(0, d.pos + shift), max(0, d.frames_total - 1))
+        if (d.orig_beats is None or len(d.orig_beats) < 2 or m.beats is None
+                or len(m.beats) < 2 or m.native_bpm <= 0 or d.native_bpm <= 0
+                or not m.playing):
+            return src0
+        P = 60.0 / d.native_bpm                       # B Quell-Beat-Periode
+        m_pos = self.play_pos(1 - idx)                # nimmt self.lock selbst
+        m_phase = ((m_pos - float(m.beats[0])) / period_master) % 1.0
+        b_phase = ((src0 - float(d.orig_beats[0])) / P) % 1.0
+        dphi = (m_phase - b_phase + 0.5) % 1.0 - 0.5
+        return max(0.0, src0 + dphi * P)
 
     def set_sync(self, idx, on, status_cb=None):
-        """Deck idx (tonhoehen-erhaltend) auf das Tempo des anderen Decks
-        einrasten bzw. wieder loesen. Das Dehnen laeuft im Hintergrund; bis es
-        fertig ist, spielt das Deck im Eigentempo weiter. status_cb(idx, ok)
-        wird nach dem Umschalten aufgerufen (z. B. fuer die GUI-Anzeige)."""
+        """Deck idx in ECHTZEIT (tonhoehen-erhaltend, WSOLA) auf das Tempo des
+        anderen Decks einrasten bzw. wieder loesen -- ohne Vorberechnung, also
+        sofort. status_cb(idx, ok) optional fuer die GUI."""
         d = self.decks[idx]
         other = self.decks[1 - idx]
         if on:
             if d.orig_audio is None or other.native_bpm <= 0 or d.native_bpm <= 0:
                 return False
             r = other.native_bpm / d.native_bpm
-            d.sync_pending = True
-
-            def work():
-                try:
-                    stretched = _time_stretch_stereo(d.orig_audio, r)
-                    sbeats = (d.orig_beats / r) if d.orig_beats is not None else None
-                    sticks = (d.orig_ticks / r) if d.orig_ticks is not None else None
-                except Exception:
-                    d.sync_pending = False
-                    if status_cb:
-                        status_cb(idx, False)
-                    return
-                with self.lock:
-                    if not d.sync_pending:          # inzwischen abgebrochen
-                        return
-                    d.pos = min(int(d.pos / r), max(0, stretched.shape[0] - 1))
-                    d.audio = stretched
-                    d.frames_total = stretched.shape[0]
-                    d.beats = sbeats
-                    d.ticks = sticks
-                    d.eq_zi = None                  # Filterzustand passt nicht mehr
-                    d.synced = True
-                    d.sync_ratio = r
-                    d.sync_pending = False
-                self._phase_align(idx)
-                if status_cb:
-                    status_cb(idx, True)
-
-            threading.Thread(target=work, daemon=True).start()
+            src0 = self._cur_src_sec(d)
+            src0 = self._phase_align_src(idx, src0, 60.0 / other.native_bpm)
+            st = _WSOLA(d.orig_audio, start_frame=int(max(0.0, src0 * DJ_SR)))
+            st.set_rate(r)
+            ticks = beats = None
+            if d.orig_ticks is not None:
+                ot = np.asarray(d.orig_ticks, dtype=np.float64)
+                ticks = (ot[ot >= src0] - src0) / r
+            if d.orig_beats is not None:
+                ob = np.asarray(d.orig_beats, dtype=np.float64)
+                beats = (ob[ob >= src0] - src0) / r
+            with self.lock:
+                d.stretcher = st
+                d.tempo_mode = "sync"
+                d.pos = 0
+                d.ticks = ticks
+                d.beats = beats
+                d.eq_zi = None
+                d.synced = True
+                d.gliding = False
+                d.sync_ratio = r
+            if status_cb:
+                status_cb(idx, True)
             return True
         else:
             with self.lock:
-                d.sync_pending = False
-                if d.synced and d.orig_audio is not None:
-                    d.pos = min(int(d.pos * d.sync_ratio),
-                                max(0, d.orig_audio.shape[0] - 1))
-                    d.audio = d.orig_audio
-                    d.frames_total = d.orig_audio.shape[0]
-                    d.beats = d.orig_beats
-                    d.ticks = d.orig_ticks
-                    d.eq_zi = None
-                d.synced = False
+                if d.stretcher is None:
+                    d.synced = d.gliding = False
+                    d.tempo_mode = "none"
+                    return False
+                src0f = d.stretcher.ia
+                d.stretcher = None
+                d.tempo_mode = "none"
+                d.audio = d.orig_audio
+                d.frames_total = d.orig_audio.shape[0]
+                d.pos = min(max(0, src0f), max(0, d.frames_total - 1))
+                d.beats = d.orig_beats
+                d.ticks = d.orig_ticks
+                d.eq_zi = None
+                d.synced = d.gliding = False
                 d.sync_ratio = 1.0
             return True
 
     def set_glide(self, idx, glide_s=DJ_GLIDE_S, status_cb=None):
-        """Tempo-Uebergang: Deck idx gleitet vom Master-Tempo (Tempo des anderen
-        Decks) ueber glide_s Sekunden auf sein Eigentempo. Wird in den Puffer
-        eingebacken; die mitgerechneten Tick-Zeiten lassen die Clock automatisch
-        mitgleiten. Vorberechnung laeuft im Hintergrund."""
+        """Tempo-Uebergang in ECHTZEIT: Deck idx startet im Master-Tempo und
+        gleitet ueber glide_s Sekunden auf sein Eigentempo. Die WSOLA-Rate wird
+        im Callback gerampt; die analytisch berechneten Tick-Zeiten lassen die
+        Clock automatisch mitgleiten. Sofort wirksam, ohne Vorberechnung."""
         d = self.decks[idx]
         other = self.decks[1 - idx]
-        if (d.orig_audio is None or other.native_bpm <= 0 or d.native_bpm <= 0
-                or d.sync_pending):
+        if d.orig_audio is None or other.native_bpm <= 0 or d.native_bpm <= 0:
             return False
-        r0 = other.native_bpm / d.native_bpm        # Start: Master-Tempo
-        r1 = 1.0                                     # Ziel: Eigentempo
+        r0 = other.native_bpm / d.native_bpm          # Start: Master-Tempo
+        r1 = 1.0                                       # Ziel: Eigentempo
+        src0 = self._cur_src_sec(d)
+        src0 = self._phase_align_src(idx, src0, 60.0 / other.native_bpm)
+        st = _WSOLA(d.orig_audio, start_frame=int(max(0.0, src0 * DJ_SR)))
+        st.set_rate(r0)
+        ticks = _glide_ticks(d.orig_ticks, src0, r0, r1, glide_s)
+        beats = _glide_ticks(d.orig_beats, src0, r0, r1, glide_s)
         with self.lock:
-            src_start = int(d.pos * d.sync_ratio) if d.synced else int(d.pos)
-            src_start = min(max(0, src_start), max(0, d.orig_audio.shape[0] - 1))
-        d.sync_pending = True
-
-        def work():
-            try:
-                audio, ticks, beats = _render_glide(
-                    d.orig_audio, DJ_SR, d.orig_ticks, d.orig_beats,
-                    r0, r1, glide_s, src_start)
-            except Exception:
-                d.sync_pending = False
-                if status_cb:
-                    status_cb(idx, False)
-                return
-            with self.lock:
-                if not d.sync_pending:
-                    return
-                d.audio = audio
-                d.frames_total = audio.shape[0]
-                d.ticks = ticks
-                d.beats = beats
-                d.pos = 0                            # Glide startet an aktueller Musikstelle
-                d.eq_zi = None
-                d.synced = False
-                d.sync_ratio = 1.0
-                d.gliding = True
-                d.sync_pending = False
-            if status_cb:
-                status_cb(idx, True)
-
-        threading.Thread(target=work, daemon=True).start()
+            d.stretcher = st
+            d.tempo_mode = "glide"
+            d.pos = 0
+            d.glide_r0, d.glide_r1 = r0, r1
+            d.glide_t0, d.glide_dur = 0.0, glide_s
+            d.ticks = ticks
+            d.beats = beats
+            d.eq_zi = None
+            d.synced = False
+            d.gliding = True
+            d.sync_ratio = r0
+        if status_cb:
+            status_cb(idx, True)
         return True
 
     def start_stream(self):

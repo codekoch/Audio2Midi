@@ -1211,12 +1211,12 @@ class DisplayApp:
             el.bind("<Button-1>", lambda e, i=idx: self._dj_fade(i))
 
     def _dj_sync_toggle(self, idx):
-        """Deck auf das Tempo des anderen Decks einrasten/loesen (tonhöhen-
-        erhaltend, im Hintergrund vorab gedehnt). Status zeigt _dj_tick."""
+        """Deck in Echtzeit auf das Tempo des anderen Decks einrasten/loesen
+        (tonhöhen-erhaltend). Status zeigt _dj_tick."""
         if self.dj_engine is None:
             return
         d = self.dj_engine.decks[idx]
-        if d.synced or d.sync_pending:
+        if d.synced:
             self.dj_engine.set_sync(idx, False)
         else:
             self.dj_engine.set_sync(idx, True)   # False, wenn anderes Deck fehlt
@@ -1354,16 +1354,14 @@ class DisplayApp:
             w["panel"].config(highlightbackground=COL_OK if dom else COL_BG)
             sb = w.get("sync")
             if sb is not None:
-                if d.sync_pending:
-                    sb.config(text="rechnet …", bg=COL_WARN, fg="#412402")
-                elif d.synced:
+                if d.synced:
                     sb.config(text=f"Sync ✓ {int(round(eng.decks[1-idx].native_bpm))}",
                               bg=COL_OK, fg="#04342C")
                 else:
                     sb.config(text="Sync", bg=COL_BG, fg=COL_FG)
             gb = w.get("glide")
             if gb is not None:
-                if d.gliding and not d.sync_pending:
+                if d.gliding:
                     gb.config(text="Übergang ✓", bg=COL_OK, fg="#04342C")
                 else:
                     gb.config(text="Übergang", bg=COL_BG, fg=COL_FG)
