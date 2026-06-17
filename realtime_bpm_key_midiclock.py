@@ -923,6 +923,25 @@ def classify_key(pcp, bass=None, with_margin=False):
     return scores[0][1]
 
 
+def estimate_key(y, sr, with_margin=False):
+    """Tonart eines Mono-Signals offline schaetzen -- inklusive Bass-Evidenz,
+    die Dur von der Mollparallele trennt. WICHTIG: chroma_pcp liefert ein TUPEL
+    (pcp, bass); genau dieses Auspacken wurde an mehreren Offline-Stellen
+    vergessen (das Tupel landete als 'pcp' in classify_key und ergab konstant
+    'C Dur'). Rueckgabe: Name oder (name, margin)."""
+    try:
+        res = chroma_pcp(y, sr)
+    except Exception:
+        res = None
+    if not res:
+        return ("—", 0.0) if with_margin else "—"
+    pcp, bass = res[0], res[1]
+    if with_margin:
+        name, margin, _second = classify_key(pcp, bass, with_margin=True)
+        return name, margin
+    return classify_key(pcp, bass)
+
+
 
 def chord_tail_sec(onset_env, fr, bpm):
     """Laenge des Akkord-Fensters in Sekunden (fuer chroma_pcp/tail_sec).
@@ -2701,8 +2720,7 @@ def _seg_bpm(y, sr, min_bpm, max_bpm):
 def _seg_key(y, sr):
     ya = _to_analysis_sr(y, sr)
     try:
-        pcp = chroma_pcp(ya, ANALYSIS_SR)
-        name, margin, _s = classify_key(pcp, with_margin=True)
+        name, margin = estimate_key(ya, ANALYSIS_SR, with_margin=True)
         return name, margin
     except Exception:
         return "", 0.0
@@ -4151,8 +4169,7 @@ def run_file_mode(path):
         sys.exit("Kein Tempo erkannt -- Datei zu kurz oder ohne klaren Beat?")
     key = "—"
     try:
-        pcp = chroma_pcp(y_an, ANALYSIS_SR)
-        key, _m, _s = classify_key(pcp, with_margin=True)
+        key, _m = estimate_key(y_an, ANALYSIS_SR, with_margin=True)
     except Exception:
         pass
     tag = "konstant -> driftfrei" if info["constant"] else "variabel"
@@ -4226,7 +4243,7 @@ def run_dj_mode(path_a, path_b):
             sys.exit(f"Deck {'AB'[idx]} fehlgeschlagen: {e}")
         key = ""
         try:
-            key = classify_key(chroma_pcp(y_an, ANALYSIS_SR))
+            key = estimate_key(y_an, ANALYSIS_SR)
         except Exception:
             pass
         eng.load(idx, audio, sr_play, info, key, os.path.basename(p))

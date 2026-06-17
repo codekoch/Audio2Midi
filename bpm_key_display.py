@@ -778,8 +778,7 @@ class DisplayApp:
             return
         key, key_conf = "—", False
         try:
-            pcp = core.chroma_pcp(y_an, core.ANALYSIS_SR)
-            name, margin, _second = core.classify_key(pcp, with_margin=True)
+            name, margin = core.estimate_key(y_an, core.ANALYSIS_SR, with_margin=True)
             key, key_conf = name, margin >= core.KEY_CONFIDENT_MARGIN
         except Exception:
             pass
@@ -1373,8 +1372,7 @@ class DisplayApp:
         key = ""
         if info is not None:
             try:
-                pcp = core.chroma_pcp(y_an, core.ANALYSIS_SR)
-                key = core.classify_key(pcp)
+                key = core.estimate_key(y_an, core.ANALYSIS_SR)
             except Exception:
                 key = ""
         self._dj_load_res = (idx, audio, sr_play, info, key,
