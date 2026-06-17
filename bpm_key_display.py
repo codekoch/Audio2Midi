@@ -44,7 +44,7 @@ import numpy as np
 try:
     import tkinter as tk
     import tkinter.font as tkfont
-    from tkinter import filedialog
+    from tkinter import filedialog, messagebox
 except ImportError:
     sys.exit("Tkinter fehlt. Raspberry Pi OS: sudo apt install python3-tk")
 
@@ -1238,12 +1238,20 @@ class DisplayApp:
         if not path:
             return
         if not core.demucs_available():
-            self.dj_clock_lbl.config(
-                text="Stems: 'demucs' nicht installiert (pip install demucs)",
-                fg=COL_WARN)
+            messagebox.showinfo(
+                "Stem-Trennung nicht verfügbar",
+                "Für die Stem-Trennung wird das lokale KI-Modell 'demucs' "
+                "benötigt – es ist nicht installiert.\n\n"
+                "Installieren mit:\n    pip install demucs\n\n"
+                "(zieht PyTorch nach, größerer Download). Danach den DJ-Modus "
+                "neu öffnen und die Datei erneut laden.")
             return
         if w.get("stems"):
             w["stems"].config(text="trennt …", state="disabled")
+        self.dj_clock_lbl.config(
+            text=f"Deck {'A' if idx == 0 else 'B'}: trenne Stems (KI, lokal) … "
+                 "kann einige Minuten dauern; beim ersten Mal lädt das Modell.",
+            fg=COL_WARN)
         threading.Thread(target=self._dj_stems_thread, args=(idx, path),
                          daemon=True).start()
 
@@ -1266,18 +1274,21 @@ class DisplayApp:
         if err or not stems:
             if w.get("stems"):
                 w["stems"].config(text="Stems", state="normal")
-            self.dj_clock_lbl.config(text=f"Stem-Trennung fehlgeschlagen: {err}",
-                                     fg=COL_WARN)
+            self.dj_clock_lbl.config(text="Stem-Trennung fehlgeschlagen", fg=COL_WARN)
+            messagebox.showerror("Stem-Trennung fehlgeschlagen",
+                                 f"Die Trennung ist fehlgeschlagen:\n\n{err}")
             return
         try:
             names = self.dj_engine.load_stems(idx, stems, sr)
         except Exception as e:
             if w.get("stems"):
                 w["stems"].config(text="Stems", state="normal")
-            self.dj_clock_lbl.config(text=f"Stems-Fehler: {e}", fg=COL_WARN)
+            messagebox.showerror("Stems", f"Stems konnten nicht geladen werden:\n{e}")
             return
         if w.get("stems"):
             w["stems"].config(text="Stems ✓", state="normal")
+        self.dj_clock_lbl.config(text=f"Deck {'A' if idx == 0 else 'B'}: Stems bereit",
+                                 fg=COL_OK)
         self._open_stem_mixer(idx, names)
 
     def _open_stem_mixer(self, idx, names):
@@ -1397,8 +1408,8 @@ class DisplayApp:
         w["bpm"].config(text=f"{int(round(info['bpm']))}", fg=COL_FG)
         w["key"].config(text=key or "")
         w["play"].config(state="normal")
-        if w.get("stems") and core.demucs_available() and w.get("path"):
-            w["stems"].config(state="normal")        # Stem-Trennung moeglich
+        if w.get("stems") and w.get("path"):
+            w["stems"].config(state="normal")        # klickbar; Hinweis bei Klick, falls demucs fehlt
         dur = info.get("duration", 0.0)
         w["pos"].config(text=f"0:00 / {self._fmt_pos(dur)}")
 

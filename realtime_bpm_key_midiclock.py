@@ -2871,9 +2871,8 @@ def _get_separator(model="htdemucs"):
     return _demucs_sep
 
 
-def separate_stems(path, model="htdemucs"):
-    """Trennt eine Audiodatei lokal per Demucs. Rueckgabe (dict {name:
-    (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell)."""
+def _separate_stems_api(path, model="htdemucs"):
+    """Trennung ueber die demucs.api (demucs >= 4)."""
     sep = _get_separator(model)
     _origin, separated = sep.separate_audio_file(path)
     sr = int(getattr(sep, "samplerate", DJ_SR))
@@ -2884,6 +2883,47 @@ def separate_stems(path, model="htdemucs"):
             arr = arr.reshape(1, -1)
         out[name] = np.ascontiguousarray(arr.T, dtype=np.float32)  # (samples, ch)
     return out, sr
+
+
+def _separate_stems_cli(path, model="htdemucs"):
+    """Fallback ueber die Demucs-Kommandozeile (versionsrobust): schreibt die
+    Stems in einen Temp-Ordner und liest sie zurueck."""
+    import subprocess
+    import tempfile
+    import shutil
+    if sf is None:
+        raise RuntimeError("soundfile fehlt")
+    tmp = tempfile.mkdtemp(prefix="a2m_stems_")
+    try:
+        subprocess.run([sys.executable, "-m", "demucs", "-n", model, "-o", tmp, path],
+                       check=True, capture_output=True)
+        base = os.path.splitext(os.path.basename(path))[0]
+        stem_dir = os.path.join(tmp, model, base)
+        out, sr = {}, DJ_SR
+        for name in list(STEM_NAMES) + ["guitar", "piano"]:
+            f = os.path.join(stem_dir, name + ".wav")
+            if os.path.exists(f):
+                data, srr = sf.read(f, dtype='float32', always_2d=True)
+                out[name] = np.ascontiguousarray(data, dtype=np.float32)
+                sr = int(srr)
+        if not out:
+            raise RuntimeError("keine Stem-Dateien gefunden")
+        return out, sr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def separate_stems(path, model="htdemucs"):
+    """Trennt eine Audiodatei lokal per Demucs. Rueckgabe (dict {name:
+    (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell). Versucht erst
+    die Python-API, dann die Kommandozeile (robust gegen Versionsunterschiede)."""
+    try:
+        return _separate_stems_api(path, model)
+    except Exception as e_api:
+        try:
+            return _separate_stems_cli(path, model)
+        except Exception as e_cli:
+            raise RuntimeError(f"Demucs-API: {e_api}; CLI: {e_cli}")
 
 
 def separate_stems_to_files(path, out_dir, model="htdemucs", base=None):
