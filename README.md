@@ -84,10 +84,12 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   gleitet automatisch mit.
 - **Stem-Trennung (lokales KI-Modell)** (optional) – ein Stück lässt sich lokal
   und offline per **Demucs** (`htdemucs`) in **Drums, Bass, Gesang, Rest**
-  zerlegen. In der Konsole über `--stems DATEI [--out ORDNER]` (speichert die
-  Spuren als WAVs). Im DJ-Modus werden die Stems beim Laden getrennt und je Deck
-  in Echtzeit mischbar (Pegel je Instrument) – echte Instrument-Isolation statt
-  bloßer Frequenzfilterung. Braucht das zusätzliche Paket **`demucs`**
+  zerlegen. Im **DJ-Modus** trennt die Schaltfläche „Stems" je Deck und öffnet
+  einen Stem-Mischer (Pegel je Instrument, **in Echtzeit** mischbar – echte
+  Instrument-Isolation statt bloßer Frequenzfilterung; lässt sich mit dem
+  Tempo-Sync kombinieren). Zum reinen **Export** gibt es „Stems exportieren …"
+  im Einstellungsbildschirm bzw. `--stems DATEI [--out ORDNER]` in der Konsole
+  (speichert die Spuren als einzelne WAVs). Braucht das zusätzliche Paket **`demucs`**
   (`pip install demucs`, zieht PyTorch); ohne bleibt das Feature einfach aus. Die
   KI-Trennung läuft offline und kann je nach CPU einige Minuten je Stück dauern.
 - **Zwei Oberflächen** – Konsolen-Version (`realtime_bpm_key_midiclock.py`)

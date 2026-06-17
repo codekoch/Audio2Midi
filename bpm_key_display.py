@@ -195,6 +195,8 @@ class DisplayApp:
         self.dj_win = None
         self.dj_w = [{}, {}]                  # Widget-Referenzen je Deck
         self._dj_load_res = None              # (idx, audio, sr, info, key, name)
+        self._dj_stems_res = None             # (idx, stems, sr, err) vom Trenn-Thread
+        self._stems_export_res = None         # (paths|None, err) vom Export-Thread
         self._load_options()                  # Optionen + BPM-Bereich anwenden
 
         # ---- Schriften (Groesse wird bei Resize angepasst) ----
@@ -502,6 +504,8 @@ class DisplayApp:
                  bg=COL_BG, fg="#55544E").pack(anchor="w", pady=(2, 0))
         self._small_button(bottom, "Noten-Kalibrierung …",
                            self.open_note_calib).pack(side="left", padx=(16, 0))
+        self._small_button(bottom, "Stems exportieren …",
+                           self.open_stems_export).pack(side="left", padx=(10, 0))
         tk.Button(bottom, text="Start", command=self.on_setup_start,
                   font=self.f_btn, bg="#1D9E75", fg="#04342C",
                   activebackground=COL_OK, activeforeground="#04342C",
@@ -1164,29 +1168,24 @@ class DisplayApp:
         lvl.pack(fill="x", padx=18, pady=(0, 8))
         w["lvl"] = lvl
         w["lvlrect"] = lvl.create_rectangle(0, 0, 0, 10, fill=COL_OK, width=0)
-        bar = tk.Frame(panel, bg=COL_SURFACE)
-        bar.pack(pady=(0, 12))
-        self._small_button(bar, "Laden …",
-                           lambda i=idx: self._dj_load(i)).pack(side="left", padx=4)
-        w["play"] = tk.Button(bar, text="▶", command=lambda i=idx: self._dj_play(i),
-                              font=self.f_small, bg=COL_BG, fg=COL_FG,
-                              activebackground=COL_SURF_HI, activeforeground=COL_FG,
-                              bd=0, padx=14, pady=4, highlightthickness=0,
-                              cursor="hand2", state="disabled")
+        def _db(parent, text, cmd, **kw):
+            return tk.Button(parent, text=text, command=cmd, font=self.f_small,
+                             bg=COL_BG, fg=COL_FG, activebackground=COL_SURF_HI,
+                             activeforeground=COL_FG, bd=0, pady=4,
+                             highlightthickness=0, cursor="hand2",
+                             padx=kw.get("padx", 12), state=kw.get("state", "normal"))
+        bar = tk.Frame(panel, bg=COL_SURFACE)        # Reihe 1: Laden / Play / Stems
+        bar.pack(pady=(0, 4))
+        _db(bar, "Laden …", lambda i=idx: self._dj_load(i)).pack(side="left", padx=4)
+        w["play"] = _db(bar, "▶", lambda i=idx: self._dj_play(i), padx=14, state="disabled")
         w["play"].pack(side="left", padx=4)
-        w["sync"] = tk.Button(bar, text="Sync",
-                              command=lambda i=idx: self._dj_sync_toggle(i),
-                              font=self.f_small, bg=COL_BG, fg=COL_FG,
-                              activebackground=COL_SURF_HI, activeforeground=COL_FG,
-                              bd=0, padx=12, pady=4, highlightthickness=0,
-                              cursor="hand2")
+        w["stems"] = _db(bar, "Stems", lambda i=idx: self._dj_stems(i), state="disabled")
+        w["stems"].pack(side="left", padx=4)
+        bar2 = tk.Frame(panel, bg=COL_SURFACE)       # Reihe 2: Sync / Uebergang
+        bar2.pack(pady=(0, 10))
+        w["sync"] = _db(bar2, "Sync", lambda i=idx: self._dj_sync_toggle(i))
         w["sync"].pack(side="left", padx=4)
-        w["glide"] = tk.Button(bar, text="Übergang",
-                               command=lambda i=idx: self._dj_glide(i),
-                               font=self.f_small, bg=COL_BG, fg=COL_FG,
-                               activebackground=COL_SURF_HI, activeforeground=COL_FG,
-                               bd=0, padx=12, pady=4, highlightthickness=0,
-                               cursor="hand2")
+        w["glide"] = _db(bar2, "Übergang", lambda i=idx: self._dj_glide(i))
         w["glide"].pack(side="left", padx=4)
         # EQ-Isolator: senkrechte Slider (Bass/Mitte/Höhen), kontinuierlich
         # regelbar von +6 dB (oben) bis -40 dB (unten, praktisch aus).
@@ -1221,6 +1220,86 @@ class DisplayApp:
         else:
             self.dj_engine.set_sync(idx, True)   # False, wenn anderes Deck fehlt
 
+    def _dj_stems(self, idx):
+        """KI-Stem-Trennung (Demucs) fuer ein Deck anstoßen; danach öffnet sich
+        ein Stem-Mischer (Pegel je Instrument, live)."""
+        if self.dj_engine is None:
+            return
+        w = self.dj_w[idx]
+        path = w.get("path")
+        if not path:
+            return
+        if not core.demucs_available():
+            self.dj_clock_lbl.config(
+                text="Stems: 'demucs' nicht installiert (pip install demucs)",
+                fg=COL_WARN)
+            return
+        if w.get("stems"):
+            w["stems"].config(text="trennt …", state="disabled")
+        threading.Thread(target=self._dj_stems_thread, args=(idx, path),
+                         daemon=True).start()
+
+    def _dj_stems_thread(self, idx, path):
+        try:
+            stems, sr = core.separate_stems(path, model="htdemucs")
+            self._dj_stems_res = (idx, stems, sr, None)
+        except Exception as e:
+            self._dj_stems_res = (idx, None, 0, str(e))
+
+    def _dj_poll_stems(self):
+        res = self._dj_stems_res
+        if res is None:
+            return
+        self._dj_stems_res = None
+        idx, stems, sr, err = res
+        w = self.dj_w[idx]
+        if not w or self.dj_engine is None:
+            return
+        if err or not stems:
+            if w.get("stems"):
+                w["stems"].config(text="Stems", state="normal")
+            self.dj_clock_lbl.config(text=f"Stem-Trennung fehlgeschlagen: {err}",
+                                     fg=COL_WARN)
+            return
+        try:
+            names = self.dj_engine.load_stems(idx, stems, sr)
+        except Exception as e:
+            if w.get("stems"):
+                w["stems"].config(text="Stems", state="normal")
+            self.dj_clock_lbl.config(text=f"Stems-Fehler: {e}", fg=COL_WARN)
+            return
+        if w.get("stems"):
+            w["stems"].config(text="Stems ✓", state="normal")
+        self._open_stem_mixer(idx, names)
+
+    def _open_stem_mixer(self, idx, names):
+        letter = "A" if idx == 0 else "B"
+        win = tk.Toplevel(self.root)
+        win.title(f"Stems – Deck {letter}")
+        win.configure(bg=COL_BG)
+        win.transient(self.root)
+        tk.Label(win, text=f"Stems – Deck {letter}", font=self.f_h1, bg=COL_BG,
+                 fg=COL_FG).pack(pady=(12, 2))
+        tk.Label(win, text="Pegel je Instrument (live)", font=self.f_tiny,
+                 bg=COL_BG, fg=COL_MUTED).pack(pady=(0, 8))
+        body = tk.Frame(win, bg=COL_BG)
+        body.pack(padx=20, pady=8)
+        for k, nm in enumerate(names):
+            col = tk.Frame(body, bg=COL_BG)
+            col.pack(side="left", padx=12)
+            v = tk.DoubleVar(value=1.0)
+            tk.Scale(col, from_=1.5, to=0.0, resolution=0.01, orient="vertical",
+                     variable=v, showvalue=False, length=150,
+                     command=lambda val, i=idx, kk=k: (
+                         self.dj_engine.set_stem_gain(i, kk, float(val))
+                         if self.dj_engine else None),
+                     bg=COL_BG, fg=COL_FG, troughcolor=COL_SURFACE,
+                     highlightthickness=0, bd=0, sliderrelief="flat",
+                     activebackground=COL_OK, width=16).pack()
+            tk.Label(col, text=core.STEM_LABELS.get(nm, nm), font=self.f_small,
+                     bg=COL_BG, fg=COL_ACCENT).pack()
+        self._small_button(win, "Schließen", win.destroy).pack(pady=12)
+
     def _dj_glide(self, idx):
         """Tempo-Übergang anstoßen: Deck gleitet vom Master-Tempo auf sein
         Eigentempo (in den Puffer eingebacken, die Clock gleitet mit)."""
@@ -1243,10 +1322,13 @@ class DisplayApp:
         if not path or self.dj_engine is None:
             return
         w = self.dj_w[idx]
+        w["path"] = path                              # fuer die Stem-Trennung merken
         w["name"].config(text=os.path.basename(path))
         w["bpm"].config(text="…", fg=COL_MUTED)
         w["pos"].config(text="analysiere …")
         w["play"].config(state="disabled")
+        if w.get("stems"):
+            w["stems"].config(state="disabled")
         if not self.warmed:
             self._warm_blocking()
         threading.Thread(target=self._dj_analyze_thread,
@@ -1300,6 +1382,8 @@ class DisplayApp:
         w["bpm"].config(text=f"{int(round(info['bpm']))}", fg=COL_FG)
         w["key"].config(text=key or "")
         w["play"].config(state="normal")
+        if w.get("stems") and core.demucs_available() and w.get("path"):
+            w["stems"].config(state="normal")        # Stem-Trennung moeglich
         dur = info.get("duration", 0.0)
         w["pos"].config(text=f"0:00 / {self._fmt_pos(dur)}")
 
@@ -1337,6 +1421,7 @@ class DisplayApp:
         if eng is None or self.dj_win is None or not self.dj_win.winfo_exists():
             return
         self._dj_poll_load()
+        self._dj_poll_stems()
         for idx in (0, 1):
             d = eng.decks[idx]
             w = self.dj_w[idx]
@@ -1481,6 +1566,40 @@ class DisplayApp:
     def _reset_calib(self):
         for k, v in self._calib_vars.items():
             v.set(self._CALIB_DEFAULTS[k])
+
+    # ------------------------------------------------------------------
+    # Stems exportieren (KI-Trennung -> einzelne WAVs)
+    # ------------------------------------------------------------------
+    def open_stems_export(self):
+        """Datei wählen, lokal per Demucs in Stems trennen und als WAVs ablegen.
+        Läuft im Hintergrund (kann je nach CPU einige Minuten dauern)."""
+        if not core.demucs_available():
+            self.err_label.config(
+                text="Stem-Trennung braucht das Paket 'demucs' (pip install demucs).")
+            return
+        path = filedialog.askopenfilename(
+            title="Datei für die Stem-Trennung",
+            filetypes=[("Audio", "*.wav *.flac *.mp3 *.ogg *.m4a *.aif *.aiff"),
+                       ("Alle Dateien", "*.*")])
+        if not path:
+            return
+        cfg = load_config()
+        out_dir = filedialog.askdirectory(
+            title="Zielordner für die Stems",
+            initialdir=cfg.get("last_save_dir") or os.path.dirname(path))
+        if not out_dir:
+            out_dir = os.path.dirname(path)
+        save_config({**cfg, "last_save_dir": out_dir})
+        self.err_label.config(text="Trenne Stems (KI, lokal) … das kann einige Minuten dauern.")
+        threading.Thread(target=self._stems_export_thread,
+                         args=(path, out_dir), daemon=True).start()
+
+    def _stems_export_thread(self, path, out_dir):
+        try:
+            paths = core.separate_stems_to_files(path, out_dir, model="htdemucs")
+            self._stems_export_res = (paths, None)
+        except Exception as e:
+            self._stems_export_res = (None, str(e))
 
     def on_setup_start(self):
         sel = self.lb_in.curselection()
@@ -1699,6 +1818,15 @@ class DisplayApp:
     # Anzeige-Aktualisierung (~6x pro Sekunde)
     # ------------------------------------------------------------------
     def _tick(self):
+        # Stems-Export fertig? (Hintergrund-Thread -> Anzeige im Setup)
+        if self._stems_export_res is not None:
+            paths, err = self._stems_export_res
+            self._stems_export_res = None
+            if err:
+                self.err_label.config(text=f"Stem-Trennung fehlgeschlagen: {err}")
+            elif paths:
+                self.err_label.config(
+                    text=f"{len(paths)} Stems gespeichert in {os.path.dirname(paths[0])}")
         # Datei-Modus: verzoegerter Start (Analyse-Thread -> Main-Thread, Tk-only)
         if self._file_begin_args is not None:
             kind, gen, payload = self._file_begin_args
