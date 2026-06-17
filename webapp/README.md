@@ -207,8 +207,19 @@ zu dem übergeblendet wird.
   geblendet wird (ihre 24-PPQN-Ticks werden gegen dessen Wiedergabeposition
   terminiert). Sobald ein Deck dominiert (Crossfader über der Mitte), übernimmt
   die Clock dessen Tempo – das angeschlossene Gerät läuft also synchron zum
-  gerade gehörten Track. Beim Wechsel passt sich das Tempo an (kein Beatmatch –
-  die Clock springt auf das neue Songtempo).
+  gerade gehörten Track. Ohne „Sync" springt das Tempo beim Wechsel auf das neue
+  Songtempo; mit „Sync" (siehe unten) bleibt es konstant.
+- **EQ-Isolator:** Je Deck lassen sich **Bass / Mitte / Höhen** einzeln
+  stummschalten (z. B. den Bass rausnehmen, während übergeblendet wird). Das ist
+  schlanke Frequenzfilterung (native `BiquadFilterNode`-Kette), **kein** echtes
+  Heraustrennen einzelner Instrumente.
+- **Sync (Tempo-Match):** Per **„Sync"** rastet ein Deck **tonhöhen-erhaltend**
+  auf das Tempo des anderen Decks ein (mit Beat-Phasen-Ausrichtung). Die Clock
+  bleibt dann beim Überblenden konstant. Die Zeitdehnung wird einmal vorab
+  berechnet (Phase-Vocoder); bei langen Tracks dauert das einen Moment.
+- **Übergang (Tempo-Glide):** Mit **„Übergang"** gleitet ein Deck vom
+  Master-Tempo allmählich auf sein **Eigentempo** – der Tempowechsel wird in den
+  Puffer eingebacken, und die MIDI-Clock gleitet automatisch mit.
 
 Tipp: Den BPM-Bereich vor dem Laden grob passend setzen (steuert die Analyse).
 Den Tab im Vordergrund lassen.
