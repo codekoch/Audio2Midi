@@ -2815,6 +2815,84 @@ def save_wav_slice(audio, sr, s0, s1, path):
 
 
 # ===========================================================================
+# Stem-Trennung (lokales KI-Modell Demucs) -- optional
+# ===========================================================================
+# Trennt ein Stueck in Instrumentengruppen (Drums/Bass/Gesang/Rest). Laeuft
+# komplett lokal und OFFLINE ueber Demucs (PyTorch); langsam, daher als
+# Hintergrundschritt gedacht. Optionale Abhaengigkeit -- ohne Demucs bleibt das
+# Feature einfach aus. torch wird ERST beim ersten Trennen importiert (sonst
+# wuerde es jeden Programmstart spuerbar verlangsamen).
+STEM_NAMES = ("drums", "bass", "other", "vocals")
+STEM_LABELS = {"drums": "Drums", "bass": "Bass", "vocals": "Vocals", "other": "Rest"}
+_demucs_sep = None
+_demucs_mod = None
+
+
+def demucs_available():
+    """Schnelltest (ohne torch zu importieren), ob Demucs nutzbar waere."""
+    import importlib.util as _u
+    return (_u.find_spec("demucs") is not None
+            and _u.find_spec("torch") is not None)
+
+
+def _get_separator(model="htdemucs"):
+    global _demucs_sep, _demucs_mod
+    if _demucs_mod is None:
+        try:
+            import torch
+            from demucs.api import Separator
+            _demucs_mod = (torch, Separator)
+        except Exception as e:
+            raise RuntimeError("Demucs/torch nicht installiert "
+                               "(pip install demucs): " + str(e))
+    torch, Separator = _demucs_mod
+    if _demucs_sep is None or getattr(_demucs_sep, "_a2m_model", None) != model:
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _demucs_sep = Separator(model=model, device=dev)
+        _demucs_sep._a2m_model = model
+    return _demucs_sep
+
+
+def separate_stems(path, model="htdemucs"):
+    """Trennt eine Audiodatei lokal per Demucs. Rueckgabe (dict {name:
+    (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell)."""
+    sep = _get_separator(model)
+    _origin, separated = sep.separate_audio_file(path)
+    sr = int(getattr(sep, "samplerate", DJ_SR))
+    out = {}
+    for name, tensor in separated.items():
+        arr = tensor.detach().cpu().numpy()        # (channels, samples)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        out[name] = np.ascontiguousarray(arr.T, dtype=np.float32)  # (samples, ch)
+    return out, sr
+
+
+def separate_stems_to_files(path, out_dir, model="htdemucs", base=None):
+    """Trennt eine Datei und speichert die Spuren als einzelne WAVs.
+    Rueckgabe: Liste der geschriebenen Pfade."""
+    if sf is None:
+        raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
+    stems, sr = separate_stems(path, model)
+    base = sanitize_filename(base or os.path.splitext(os.path.basename(path))[0])
+    written = []
+    for name in STEM_NAMES:
+        if name not in stems:
+            continue
+        p = os.path.join(out_dir, f"{base}_{name}.wav")
+        sf.write(p, stems[name], sr, subtype='PCM_16')
+        written.append(p)
+    # evtl. zusaetzliche Stems (6s-Modell: guitar/piano) ebenfalls schreiben
+    for name, audio in stems.items():
+        if name in STEM_NAMES:
+            continue
+        p = os.path.join(out_dir, f"{base}_{name}.wav")
+        sf.write(p, audio, sr, subtype='PCM_16')
+        written.append(p)
+    return written
+
+
+# ===========================================================================
 # DJ-Modus: zwei Decks, Equal-Power-Crossfade, Clock folgt dem Ziel-Deck
 # ===========================================================================
 # Mirror der WebApp: zwei Audiodateien werden nebeneinander geladen/analysiert
@@ -3002,6 +3080,11 @@ class DJDeck:
         self.glide_r1 = 1.0
         self.glide_t0 = 0.0
         self.glide_dur = DJ_GLIDE_S
+        # Stems (KI-getrennte Instrumentenspuren, in Echtzeit mischbar):
+        self.stems = None              # Liste [(frames,ch) float32] in stem_names-Reihenfolge
+        self.stem_names = None         # Namensliste (z. B. drums/bass/other/vocals)
+        self.stem_gain = None          # Liste float je Stem (0..1.x), live regelbar
+        self.stem_str = None           # je Stem ein _WSOLA, wenn Tempo veraendert wird
 
 
 class DJEngine:
@@ -3060,6 +3143,62 @@ class DJEngine:
             d.gliding = False
             d.stretcher = None
             d.tempo_mode = "none"
+            d.stems = None
+            d.stem_names = None
+            d.stem_gain = None
+            d.stem_str = None
+
+    def _adapt(self, audio, sr):
+        """Puffer auf DJ_SR + Engine-Kanalzahl bringen (Resampling/Kanaladaption)."""
+        a = np.asarray(audio, dtype=np.float32)
+        if a.ndim == 1:
+            a = a.reshape(-1, 1)
+        if int(sr) != DJ_SR:
+            try:
+                a = np.ascontiguousarray(
+                    librosa.resample(a.T, orig_sr=int(sr), target_sr=DJ_SR).T,
+                    dtype=np.float32)
+            except Exception:
+                pass
+        if a.shape[1] == 1 and self.channels >= 2:
+            a = np.repeat(a, self.channels, axis=1)
+        elif a.shape[1] > self.channels:
+            a = np.ascontiguousarray(a[:, :self.channels])
+        elif a.shape[1] < self.channels:
+            a = np.repeat(a[:, :1], self.channels, axis=1)
+        return a
+
+    def load_stems(self, idx, stems_dict, sr):
+        """KI-getrennte Spuren als Stems eines bereits geladenen Decks setzen.
+        Reihenfolge: bekannte STEM_NAMES zuerst, weitere angehaengt. Live ueber
+        set_stem_gain mischbar (Pegel je Instrument)."""
+        names = ([n for n in STEM_NAMES if n in stems_dict]
+                 + [n for n in stems_dict if n not in STEM_NAMES])
+        prepared = [self._adapt(stems_dict[n], sr) for n in names]
+        if not prepared:
+            return []
+        L = min(p.shape[0] for p in prepared)
+        prepared = [p[:L] for p in prepared]
+        with self.lock:
+            d = self.decks[idx]
+            d.stems = prepared
+            d.stem_names = names
+            d.stem_gain = [1.0] * len(prepared)
+            d.stem_str = None
+            if d.pos >= L:
+                d.pos = 0
+        return names
+
+    def clear_stems(self, idx):
+        with self.lock:
+            d = self.decks[idx]
+            d.stems = d.stem_names = d.stem_gain = d.stem_str = None
+
+    def set_stem_gain(self, idx, k, gain):
+        with self.lock:
+            d = self.decks[idx]
+            if d.stem_gain is not None and 0 <= k < len(d.stem_gain):
+                d.stem_gain[k] = float(max(0.0, gain))
 
     def _callback(self, outdata, frames, time_info, status):
         with self.lock:
@@ -3073,7 +3212,40 @@ class DJEngine:
             gains = (math.cos(x * math.pi / 2), math.sin(x * math.pi / 2))
             out = np.zeros((frames, self.channels), dtype=np.float32)
             for i, d in enumerate(self.decks):
-                if d.playing and d.stretcher is not None:
+                if d.playing and d.stems is not None:
+                    # KI-Stems: je Spur ein Pegel, in Echtzeit gemischt. Bei Tempo-
+                    # aenderung je Stem ein eigener Stretcher (gleiche Rate/Position).
+                    d.anchor_pos = d.pos
+                    d.anchor_perf = time.perf_counter()
+                    block = np.zeros((frames, self.channels), dtype=np.float32)
+                    if d.stem_str is not None:
+                        if d.tempo_mode == "glide":
+                            to = d.pos / float(DJ_SR) - d.glide_t0
+                            f = min(1.0, max(0.0, to / d.glide_dur)) if d.glide_dur > 0 else 1.0
+                            r = d.glide_r0 + (d.glide_r1 - d.glide_r0) * f
+                            for st in d.stem_str:
+                                st.set_rate(r)
+                        for k, st in enumerate(d.stem_str):
+                            block += st.pull(frames) * d.stem_gain[k]
+                        d.pos += frames
+                        if all(st.finished and st.out.shape[0] == 0 for st in d.stem_str):
+                            d.playing = False
+                    else:
+                        total = d.stems[0].shape[0]
+                        s = d.pos
+                        e = min(s + frames, total)
+                        n = e - s
+                        if n > 0:
+                            for k, st in enumerate(d.stems):
+                                block[:n] += st[s:e] * d.stem_gain[k]
+                            d.pos = e
+                        if e >= total:
+                            d.playing = False
+                    if d.eq_sos is not None and _sps is not None:
+                        block = self._deck_eq(d, block)
+                    out += block * gains[i]
+                    d.level = float(np.sqrt(np.mean(block * block))) * gains[i]
+                elif d.playing and d.stretcher is not None:
                     # Tempo veraendert -> Echtzeit-Zeitdehnung. d.pos = AUSGABE-Frames.
                     d.anchor_pos = d.pos
                     d.anchor_perf = time.perf_counter()
@@ -3129,6 +3301,8 @@ class DJEngine:
         """Aktuelle Quellposition (s): bei aktivem Stretcher dessen Leseposition,
         sonst die direkte Ausgabeposition."""
         with self.lock:
+            if d.stem_str:
+                return d.stem_str[0].ia / float(DJ_SR)
             return (d.stretcher.ia / float(DJ_SR)) if d.stretcher is not None \
                 else (d.pos / float(DJ_SR))
 
@@ -3161,8 +3335,15 @@ class DJEngine:
             r = other.native_bpm / d.native_bpm
             src0 = self._cur_src_sec(d)
             src0 = self._phase_align_src(idx, src0, 60.0 / other.native_bpm)
-            st = _WSOLA(d.orig_audio, start_frame=int(max(0.0, src0 * DJ_SR)))
-            st.set_rate(r)
+            sf0 = int(max(0.0, src0 * DJ_SR))
+            stem_str = st = None
+            if d.stems is not None:
+                stem_str = [_WSOLA(s, start_frame=sf0) for s in d.stems]
+                for s in stem_str:
+                    s.set_rate(r)
+            else:
+                st = _WSOLA(d.orig_audio, start_frame=sf0)
+                st.set_rate(r)
             ticks = beats = None
             if d.orig_ticks is not None:
                 ot = np.asarray(d.orig_ticks, dtype=np.float64)
@@ -3172,6 +3353,7 @@ class DJEngine:
                 beats = (ob[ob >= src0] - src0) / r
             with self.lock:
                 d.stretcher = st
+                d.stem_str = stem_str
                 d.tempo_mode = "sync"
                 d.pos = 0
                 d.ticks = ticks
@@ -3185,16 +3367,20 @@ class DJEngine:
             return True
         else:
             with self.lock:
-                if d.stretcher is None:
+                if d.stretcher is None and not d.stem_str:
                     d.synced = d.gliding = False
                     d.tempo_mode = "none"
                     return False
-                src0f = d.stretcher.ia
+                src0f = d.stem_str[0].ia if d.stem_str else d.stretcher.ia
                 d.stretcher = None
+                d.stem_str = None
                 d.tempo_mode = "none"
-                d.audio = d.orig_audio
-                d.frames_total = d.orig_audio.shape[0]
-                d.pos = min(max(0, src0f), max(0, d.frames_total - 1))
+                if d.stems is not None:
+                    d.pos = min(max(0, src0f), max(0, d.stems[0].shape[0] - 1))
+                else:
+                    d.audio = d.orig_audio
+                    d.frames_total = d.orig_audio.shape[0]
+                    d.pos = min(max(0, src0f), max(0, d.frames_total - 1))
                 d.beats = d.orig_beats
                 d.ticks = d.orig_ticks
                 d.eq_zi = None
@@ -3215,12 +3401,20 @@ class DJEngine:
         r1 = 1.0                                       # Ziel: Eigentempo
         src0 = self._cur_src_sec(d)
         src0 = self._phase_align_src(idx, src0, 60.0 / other.native_bpm)
-        st = _WSOLA(d.orig_audio, start_frame=int(max(0.0, src0 * DJ_SR)))
-        st.set_rate(r0)
+        sf0 = int(max(0.0, src0 * DJ_SR))
+        stem_str = st = None
+        if d.stems is not None:
+            stem_str = [_WSOLA(s, start_frame=sf0) for s in d.stems]
+            for s in stem_str:
+                s.set_rate(r0)
+        else:
+            st = _WSOLA(d.orig_audio, start_frame=sf0)
+            st.set_rate(r0)
         ticks = _glide_ticks(d.orig_ticks, src0, r0, r1, glide_s)
         beats = _glide_ticks(d.orig_beats, src0, r0, r1, glide_s)
         with self.lock:
             d.stretcher = st
+            d.stem_str = stem_str
             d.tempo_mode = "glide"
             d.pos = 0
             d.glide_r0, d.glide_r1 = r0, r1
@@ -4084,6 +4278,28 @@ def run_dj_mode(path_a, path_b):
     print("\nFertig.")
 
 
+def run_stems_export(path, out_dir=None):
+    """Konsole: eine Datei lokal per Demucs in Stems trennen und als WAVs
+    speichern. Offline, kann je nach CPU einige Minuten dauern."""
+    if not os.path.exists(path):
+        sys.exit(f"Datei nicht gefunden: {path}")
+    if not demucs_available():
+        sys.exit("Demucs ist nicht installiert. Installiere mit: pip install demucs")
+    out_dir = out_dir or os.path.dirname(os.path.abspath(path)) or os.getcwd()
+    if not os.path.isdir(out_dir):
+        sys.exit(f"Zielordner nicht gefunden: {out_dir}")
+    print(f"\nTrenne Stems (Demucs, lokal & offline) aus:\n  {path}")
+    print("Das kann je nach CPU einige Minuten dauern (GPU ist deutlich schneller) ...")
+    try:
+        written = separate_stems_to_files(path, out_dir, model="htdemucs")
+    except Exception as e:
+        sys.exit(f"Stem-Trennung fehlgeschlagen: {e}")
+    print("Geschrieben:")
+    for p in written:
+        print("  " + p)
+    print("Fertig.")
+
+
 def _console_stop_and_save(shared):
     """Konsole: laufende Aufnahme stoppen, in Stuecke zerlegen und als WAV
     speichern (gemeinsamer Zielordner, Namensvorschlag BPM+Tonart)."""
@@ -4151,6 +4367,12 @@ def main():
             run_dj_mode(sys.argv[i + 1], sys.argv[i + 2])
         else:
             sys.exit("Verwendung: --dj DATEI_A DATEI_B")
+        return
+
+    # Stems exportieren: KI-Trennung (Demucs) -> einzelne WAVs
+    stems_path = _arg_value('--stems')
+    if stems_path:
+        run_stems_export(stems_path, _arg_value('--out'))
         return
 
     winmm = None

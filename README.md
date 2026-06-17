@@ -82,6 +82,14 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   **„Übergang"** gleitet ein Deck stattdessen vom Master-Tempo allmählich auf
   sein **Eigentempo**; die WSOLA-Rate wird live gerampt und die MIDI-Clock
   gleitet automatisch mit.
+- **Stem-Trennung (lokales KI-Modell)** (optional) – ein Stück lässt sich lokal
+  und offline per **Demucs** (`htdemucs`) in **Drums, Bass, Gesang, Rest**
+  zerlegen. In der Konsole über `--stems DATEI [--out ORDNER]` (speichert die
+  Spuren als WAVs). Im DJ-Modus werden die Stems beim Laden getrennt und je Deck
+  in Echtzeit mischbar (Pegel je Instrument) – echte Instrument-Isolation statt
+  bloßer Frequenzfilterung. Braucht das zusätzliche Paket **`demucs`**
+  (`pip install demucs`, zieht PyTorch); ohne bleibt das Feature einfach aus. Die
+  KI-Trennung läuft offline und kann je nach CPU einige Minuten je Stück dauern.
 - **Zwei Oberflächen** – Konsolen-Version (`realtime_bpm_key_midiclock.py`)
   und Touch-taugliche Kiosk-GUI (`bpm_key_display.py`) für ein 7-Zoll-Display
   am Raspberry Pi; unter Windows und macOS läuft sie im Fenster.
