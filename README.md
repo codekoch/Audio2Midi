@@ -94,6 +94,15 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   in der Konsole (speichert die Spuren als einzelne WAVs). Braucht das zusätzliche Paket **`demucs`**
   (`pip install demucs`, zieht PyTorch); ohne bleibt das Feature einfach aus. Die
   KI-Trennung läuft offline und kann je nach CPU einige Minuten je Stück dauern.
+  Während der Trennung öffnet sich ein eigenes **Fortschritts-/Log-Fenster**: es
+  zeigt live, welcher Schritt gerade läuft (Modell laden, Audio laden, Trennung,
+  Speichern) und im Fehlerfall die **vollständige Fehlermeldung** – so lässt sich
+  beurteilen, was passiert. Das Laden der Audiodatei läuft bewusst **über librosa**
+  statt über torchaudio; dadurch funktioniert die Trennung auch dann, wenn die
+  Installation kein `torchcodec` mitbringt (neuere torchaudio-Versionen verlangen
+  es zum Laden) oder die `demucs.api` fehlt – ist die installierte Demucs-/
+  PyTorch-Version unvollständig, weicht das Programm automatisch auf einen anderen
+  Weg aus.
 - **Zwei Oberflächen** – Konsolen-Version (`realtime_bpm_key_midiclock.py`)
   und Touch-taugliche Kiosk-GUI (`bpm_key_display.py`) für ein 7-Zoll-Display
   am Raspberry Pi; unter Windows und macOS läuft sie im Fenster.

@@ -36,8 +36,10 @@ Tasten:  F11 = Vollbild umschalten,  Esc = Beenden.
 import json
 import math
 import os
+import queue
 import sys
 import threading
+import traceback
 
 import numpy as np
 
@@ -980,6 +982,73 @@ class DisplayApp:
         threading.Thread(target=self._segment_rec_thread, daemon=True).start()
         win.after(250, self._poll_rec_segs)
 
+    # ------------------------------------------------------------------
+    # Fortschritts-/Log-Fenster fuer die Stem-Trennung
+    # ------------------------------------------------------------------
+    def _stem_log_open(self, title="Stem-Trennung"):
+        """Oeffnet ein eigenes Fenster, das Fortschritt und (volle) Fehler der
+        Stem-Trennung anzeigt. Worker-Threads schicken Zeilen ueber eine
+        thread-sichere Queue; geleert wird sie im Tk-Thread per after()-Schleife.
+        Rueckgabe: Handle-dict {win, txt, q} fuer _stem_log()."""
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.configure(bg=COL_BG)
+        win.transient(self.root)
+        win.geometry("660x430")
+        tk.Label(win, text=title, font=self.f_h1, bg=COL_BG,
+                 fg=COL_FG).pack(pady=(12, 2))
+        tk.Label(win, text="Fortschritt & Meldungen – die KI laeuft lokal "
+                 "(kann einige Minuten dauern).", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_MUTED).pack(pady=(0, 8))
+        frame = tk.Frame(win, bg=COL_BG)
+        frame.pack(fill="both", expand=True, padx=14, pady=4)
+        sb = tk.Scrollbar(frame)
+        sb.pack(side="right", fill="y")
+        txt = tk.Text(frame, wrap="word", bg=COL_SURFACE, fg=COL_FG,
+                      insertbackground=COL_FG, bd=0, highlightthickness=0,
+                      font=("Courier", 10), yscrollcommand=sb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sb.config(command=txt.yview)
+        txt.config(state="disabled")
+        self._small_button(win, "Schließen", win.destroy).pack(pady=8)
+        log = {"win": win, "txt": txt, "q": queue.Queue()}
+
+        def _poll():
+            if not win.winfo_exists():
+                return
+            got = False
+            try:
+                while True:
+                    line = log["q"].get_nowait()
+                    if not got:
+                        txt.config(state="normal")
+                        got = True
+                    txt.insert("end", line + "\n")
+            except queue.Empty:
+                pass
+            if got:
+                txt.see("end")
+                txt.config(state="disabled")
+            win.after(150, _poll)
+
+        _poll()
+        return log
+
+    def _stem_log(self, log, line):
+        """Thread-sicher eine Zeile an das Log-Fenster schicken."""
+        if not log:
+            return
+        try:
+            log["q"].put(str(line))
+        except Exception:
+            pass
+
+    def _stem_log_error(self, log):
+        """Vollen Traceback ins Log-Fenster schreiben (im Fehlerfall)."""
+        self._stem_log(log, "")
+        self._stem_log(log, "── FEHLER ──")
+        self._stem_log(log, traceback.format_exc().rstrip())
+
     def _rec_to_stems(self):
         """Aufnahme direkt per KI in Stems trennen und in einem Stem-Player
         abspielbar machen (Drums/Bass/Vocals/Rest, einzeln/parallel)."""
@@ -993,16 +1062,20 @@ class DisplayApp:
                 "(zieht PyTorch nach). Danach erneut versuchen.")
             return
         self._rec_info.config(
-            text="Trenne Aufnahme in Stems (KI, lokal) … kann einige Minuten dauern.")
+            text="Trenne Aufnahme in Stems (KI, lokal) … siehe Fortschrittsfenster.")
         rec, sr = self._rec_audio, self._rec_sr
-        threading.Thread(target=self._rec_stems_thread, args=(rec, sr),
+        log = self._stem_log_open("Aufnahme → Stems")
+        threading.Thread(target=self._rec_stems_thread, args=(rec, sr, log),
                          daemon=True).start()
 
-    def _rec_stems_thread(self, rec, sr):
+    def _rec_stems_thread(self, rec, sr, log):
         try:
-            stems, ssr = core.separate_stems_array(rec, sr, model="htdemucs")
+            stems, ssr = core.separate_stems_array(
+                rec, sr, model="htdemucs",
+                log=lambda m: self._stem_log(log, m))
             self._rec_stems_res = (stems, ssr, None)
         except Exception as e:
+            self._stem_log_error(log)
             self._rec_stems_res = (None, 0, str(e))
 
     def _open_stem_player(self, stems_dict, sr):
@@ -1357,16 +1430,20 @@ class DisplayApp:
             w["stems"].config(text="trennt …", state="disabled")
         self.dj_clock_lbl.config(
             text=f"Deck {'A' if idx == 0 else 'B'}: trenne Stems (KI, lokal) … "
-                 "kann einige Minuten dauern; beim ersten Mal lädt das Modell.",
+                 "siehe Fortschrittsfenster.",
             fg=COL_WARN)
-        threading.Thread(target=self._dj_stems_thread, args=(idx, path),
+        log = self._stem_log_open(f"Stems – Deck {'A' if idx == 0 else 'B'}")
+        self._stem_log(log, f"Datei: {path}")
+        threading.Thread(target=self._dj_stems_thread, args=(idx, path, log),
                          daemon=True).start()
 
-    def _dj_stems_thread(self, idx, path):
+    def _dj_stems_thread(self, idx, path, log):
         try:
-            stems, sr = core.separate_stems(path, model="htdemucs")
+            stems, sr = core.separate_stems(
+                path, model="htdemucs", log=lambda m: self._stem_log(log, m))
             self._dj_stems_res = (idx, stems, sr, None)
         except Exception as e:
+            self._stem_log_error(log)
             self._dj_stems_res = (idx, None, 0, str(e))
 
     def _dj_poll_stems(self):
@@ -1723,15 +1800,21 @@ class DisplayApp:
         if not out_dir:
             out_dir = os.path.dirname(path)
         save_config({**cfg, "last_save_dir": out_dir})
-        self.err_label.config(text="Trenne Stems (KI, lokal) … das kann einige Minuten dauern.")
+        self.err_label.config(text="Trenne Stems (KI, lokal) … siehe Fortschrittsfenster.")
+        log = self._stem_log_open("Stem-Export")
+        self._stem_log(log, f"Datei: {path}")
+        self._stem_log(log, f"Zielordner: {out_dir}")
         threading.Thread(target=self._stems_export_thread,
-                         args=(path, out_dir), daemon=True).start()
+                         args=(path, out_dir, log), daemon=True).start()
 
-    def _stems_export_thread(self, path, out_dir):
+    def _stems_export_thread(self, path, out_dir, log):
         try:
-            paths = core.separate_stems_to_files(path, out_dir, model="htdemucs")
+            paths = core.separate_stems_to_files(
+                path, out_dir, model="htdemucs",
+                log=lambda m: self._stem_log(log, m))
             self._stems_export_res = (paths, None)
         except Exception as e:
+            self._stem_log_error(log)
             self._stems_export_res = (None, str(e))
 
     def on_setup_start(self):

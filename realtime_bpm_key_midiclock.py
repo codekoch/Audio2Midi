@@ -2844,6 +2844,7 @@ STEM_NAMES = ("drums", "bass", "other", "vocals")
 STEM_LABELS = {"drums": "Drums", "bass": "Bass", "vocals": "Vocals", "other": "Rest"}
 _demucs_sep = None
 _demucs_mod = None
+_demucs_model = None      # gecachtes Modell fuer den direkten Weg (ohne torchaudio)
 
 
 def demucs_available():
@@ -2853,9 +2854,20 @@ def demucs_available():
             and _u.find_spec("torch") is not None)
 
 
-def _get_separator(model="htdemucs"):
+def _emit(log, msg):
+    """Ruft den optionalen Fortschritts-/Log-Callback sicher auf.
+    Fehler im Callback werden geschluckt, damit die Trennung nie daran scheitert."""
+    if log:
+        try:
+            log(str(msg))
+        except Exception:
+            pass
+
+
+def _get_separator(model="htdemucs", log=None):
     global _demucs_sep, _demucs_mod
     if _demucs_mod is None:
+        _emit(log, "Lade PyTorch + Demucs (einmalig) …")
         try:
             import torch
             from demucs.api import Separator
@@ -2866,14 +2878,19 @@ def _get_separator(model="htdemucs"):
     torch, Separator = _demucs_mod
     if _demucs_sep is None or getattr(_demucs_sep, "_a2m_model", None) != model:
         dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _emit(log, f"Initialisiere Modell '{model}' auf {dev.upper()} "
+                   "(beim ersten Mal wird das Modell heruntergeladen) …")
         _demucs_sep = Separator(model=model, device=dev)
         _demucs_sep._a2m_model = model
+        _emit(log, "Modell bereit.")
     return _demucs_sep
 
 
-def _separate_stems_api(path, model="htdemucs"):
+def _separate_stems_api(path, model="htdemucs", log=None):
     """Trennung ueber die demucs.api (demucs >= 4)."""
-    sep = _get_separator(model)
+    sep = _get_separator(model, log=log)
+    _emit(log, f"Trennung laeuft (Python-API) fuer {os.path.basename(path)} … "
+               "das kann je nach Laenge und CPU einige Minuten dauern.")
     _origin, separated = sep.separate_audio_file(path)
     sr = int(getattr(sep, "samplerate", DJ_SR))
     out = {}
@@ -2882,10 +2899,77 @@ def _separate_stems_api(path, model="htdemucs"):
         if arr.ndim == 1:
             arr = arr.reshape(1, -1)
         out[name] = np.ascontiguousarray(arr.T, dtype=np.float32)  # (samples, ch)
+    _emit(log, "Stems erhalten: " + ", ".join(out.keys()))
     return out, sr
 
 
-def _separate_stems_cli(path, model="htdemucs"):
+def _get_model_direct(model="htdemucs", log=None):
+    """Laedt das Demucs-Modell ueber die Low-Level-API (pretrained/apply).
+    Unabhaengig von demucs.api UND von torchaudio -- noetig, weil neuere
+    torchaudio-Versionen zum Laden 'torchcodec' verlangen und die demucs.api
+    in manchen Installationen fehlt."""
+    global _demucs_model
+    try:
+        import torch  # noqa: F401  (nur Verfuegbarkeit pruefen / spaeter genutzt)
+        from demucs.pretrained import get_model
+        from demucs.apply import apply_model  # noqa: F401
+    except Exception as e:
+        raise RuntimeError("Demucs/torch nicht nutzbar (pip install demucs): " + str(e))
+    if _demucs_model is None or getattr(_demucs_model, "_a2m_name", None) != model:
+        _emit(log, f"Lade Modell '{model}' (direkter Weg) – beim ersten Mal "
+                   "wird es heruntergeladen …")
+        m = get_model(model)
+        m.cpu()
+        m.eval()
+        m._a2m_name = model
+        _demucs_model = m
+        _emit(log, "Modell bereit.")
+    return _demucs_model
+
+
+def _load_audio_for_demucs(path, target_sr, channels):
+    """Laedt eine Audiodatei OHNE torchaudio (per librosa/soundfile), resamplet
+    auf target_sr und bringt sie auf 'channels' Spuren. Rueckgabe: np.ndarray
+    (channels, samples) float32."""
+    wav, _sr = librosa.load(path, sr=target_sr, mono=False)
+    wav = np.asarray(wav, dtype=np.float32)
+    if wav.ndim == 1:                      # mono -> (1, samples)
+        wav = wav[None, :]
+    if wav.shape[0] == 1 and channels >= 2:
+        wav = np.repeat(wav, channels, axis=0)
+    elif wav.shape[0] > channels:
+        wav = wav[:channels]
+    elif wav.shape[0] < channels:
+        wav = np.repeat(wav[:1], channels, axis=0)
+    return np.ascontiguousarray(wav, dtype=np.float32)
+
+
+def _separate_stems_direct(path, model="htdemucs", log=None):
+    """Trennung ueber die Low-Level-API von Demucs, mit eigenem Audio-Laden
+    (librosa) statt torchaudio. Robust gegen fehlende demucs.api/torchcodec."""
+    import torch
+    from demucs.apply import apply_model
+    m = _get_model_direct(model, log=log)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    _emit(log, f"Lade Audio: {os.path.basename(path)} …")
+    wav = _load_audio_for_demucs(path, int(m.samplerate), int(m.audio_channels))
+    wt = torch.from_numpy(wav)
+    ref = wt.mean(0)                       # demucs-Normierung (wie in separate.py)
+    wt = (wt - ref.mean()) / (ref.std() + 1e-8)
+    _emit(log, f"Trennung laeuft (direkt, {dev.upper()}) … "
+               "das kann je nach Laenge und CPU einige Minuten dauern.")
+    with torch.no_grad():
+        sources = apply_model(m, wt[None], device=dev, progress=False)[0]
+    sources = sources * ref.std() + ref.mean()
+    out = {}
+    for name, src in zip(m.sources, sources):
+        arr = src.detach().cpu().numpy()   # (channels, samples)
+        out[name] = np.ascontiguousarray(arr.T, dtype=np.float32)  # (samples, ch)
+    _emit(log, "Stems erhalten: " + ", ".join(out.keys()))
+    return out, int(m.samplerate)
+
+
+def _separate_stems_cli(path, model="htdemucs", log=None):
     """Fallback ueber die Demucs-Kommandozeile (versionsrobust): schreibt die
     Stems in einen Temp-Ordner und liest sie zurueck."""
     import subprocess
@@ -2895,8 +2979,15 @@ def _separate_stems_cli(path, model="htdemucs"):
         raise RuntimeError("soundfile fehlt")
     tmp = tempfile.mkdtemp(prefix="a2m_stems_")
     try:
-        subprocess.run([sys.executable, "-m", "demucs", "-n", model, "-o", tmp, path],
-                       check=True, capture_output=True)
+        _emit(log, "Trennung laeuft (Kommandozeile: python -m demucs) …")
+        proc = subprocess.run(
+            [sys.executable, "-m", "demucs", "-n", model, "-o", tmp, path],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            # nur die letzten Zeilen, damit das Log lesbar bleibt
+            tail = "\n".join(detail.splitlines()[-12:]) if detail else "(keine Ausgabe)"
+            raise RuntimeError(f"demucs (CLI) Exit-Code {proc.returncode}:\n{tail}")
         base = os.path.splitext(os.path.basename(path))[0]
         stem_dir = os.path.join(tmp, model, base)
         out, sr = {}, DJ_SR
@@ -2907,32 +2998,43 @@ def _separate_stems_cli(path, model="htdemucs"):
                 out[name] = np.ascontiguousarray(data, dtype=np.float32)
                 sr = int(srr)
         if not out:
-            raise RuntimeError("keine Stem-Dateien gefunden")
+            raise RuntimeError(f"keine Stem-Dateien gefunden (erwartet in {stem_dir})")
+        _emit(log, "Stems erhalten: " + ", ".join(out.keys()))
         return out, sr
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def separate_stems(path, model="htdemucs"):
+def separate_stems(path, model="htdemucs", log=None):
     """Trennt eine Audiodatei lokal per Demucs. Rueckgabe (dict {name:
-    (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell). Versucht erst
-    die Python-API, dann die Kommandozeile (robust gegen Versionsunterschiede)."""
-    try:
-        return _separate_stems_api(path, model)
-    except Exception as e_api:
+    (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell).
+
+    Drei Wege, vom robustesten zum ausweichendsten:
+      1) direkt (eigenes Audio-Laden per librosa, ohne torchaudio) -- laeuft
+         auch, wenn demucs.api fehlt oder torchaudio 'torchcodec' verlangt,
+      2) demucs.api (falls vorhanden),
+      3) Kommandozeile (python -m demucs).
+    Mit optionalem log(text)-Callback fuer Fortschrittsmeldungen."""
+    errors = []
+    for label, fn in (("direkt", _separate_stems_direct),
+                      ("API", _separate_stems_api),
+                      ("CLI", _separate_stems_cli)):
         try:
-            return _separate_stems_cli(path, model)
-        except Exception as e_cli:
-            raise RuntimeError(f"Demucs-API: {e_api}; CLI: {e_cli}")
+            return fn(path, model, log=log)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+            _emit(log, f"Weg '{label}' fehlgeschlagen ({e}).")
+    raise RuntimeError("Stem-Trennung fehlgeschlagen – " + "; ".join(errors))
 
 
-def separate_stems_to_files(path, out_dir, model="htdemucs", base=None):
+def separate_stems_to_files(path, out_dir, model="htdemucs", base=None, log=None):
     """Trennt eine Datei und speichert die Spuren als einzelne WAVs.
     Rueckgabe: Liste der geschriebenen Pfade."""
     if sf is None:
         raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
-    stems, sr = separate_stems(path, model)
+    stems, sr = separate_stems(path, model, log=log)
     base = sanitize_filename(base or os.path.splitext(os.path.basename(path))[0])
+    _emit(log, f"Speichere Stems nach {out_dir} …")
     written = []
     for name in STEM_NAMES:
         if name not in stems:
@@ -2940,6 +3042,7 @@ def separate_stems_to_files(path, out_dir, model="htdemucs", base=None):
         p = os.path.join(out_dir, f"{base}_{name}.wav")
         sf.write(p, stems[name], sr, subtype='PCM_16')
         written.append(p)
+        _emit(log, "  ✓ " + os.path.basename(p))
     # evtl. zusaetzliche Stems (6s-Modell: guitar/piano) ebenfalls schreiben
     for name, audio in stems.items():
         if name in STEM_NAMES:
@@ -2947,10 +3050,12 @@ def separate_stems_to_files(path, out_dir, model="htdemucs", base=None):
         p = os.path.join(out_dir, f"{base}_{name}.wav")
         sf.write(p, audio, sr, subtype='PCM_16')
         written.append(p)
+        _emit(log, "  ✓ " + os.path.basename(p))
+    _emit(log, f"Fertig – {len(written)} Datei(en) gespeichert.")
     return written
 
 
-def separate_stems_array(audio, sr, model="htdemucs"):
+def separate_stems_array(audio, sr, model="htdemucs", log=None):
     """Wie separate_stems, aber fuer ein In-Memory-Signal (z. B. eine Aufnahme):
     schreibt eine Temp-WAV und trennt diese. Rueckgabe (dict, sr)."""
     if sf is None:
@@ -2959,8 +3064,9 @@ def separate_stems_array(audio, sr, model="htdemucs"):
     fd, tmp = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
+        _emit(log, "Schreibe Aufnahme in eine temporaere WAV-Datei …")
         sf.write(tmp, np.asarray(audio, dtype=np.float32), int(sr), subtype='PCM_16')
-        return separate_stems(tmp, model)
+        return separate_stems(tmp, model, log=log)
     finally:
         try:
             os.remove(tmp)
@@ -4455,7 +4561,8 @@ def run_stems_export(path, out_dir=None):
     print(f"\nTrenne Stems (Demucs, lokal & offline) aus:\n  {path}")
     print("Das kann je nach CPU einige Minuten dauern (GPU ist deutlich schneller) ...")
     try:
-        written = separate_stems_to_files(path, out_dir, model="htdemucs")
+        written = separate_stems_to_files(path, out_dir, model="htdemucs",
+                                          log=lambda m: print("  " + m))
     except Exception as e:
         sys.exit(f"Stem-Trennung fehlgeschlagen: {e}")
     print("Geschrieben:")
