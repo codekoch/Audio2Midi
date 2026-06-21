@@ -3186,6 +3186,12 @@ def transcribe_segments(audio, sr, size="medium", language=None, log=None):
     return lines
 
 
+# Akkorde fuers Sheet um diesen Betrag (Sekunden) nach vorne ziehen -- gleicht den
+# leichten, systematischen Versatz aus, mit dem Whisper gesungene Wortanfaenge oft
+# etwas zu spaet markiert. Der Rest schwankt je Lauf/Song -> im Sheet-Fenster live
+# nachregelbar ("Akkorde frueher/spaeter").
+CHORD_LEAD = 0.15
+
 # Fuer ein lesbares Chord-Sheet nur die gaengigen Akkordtypen zulassen --
 # dim/maj7/sus4 flackern auf der gesangslosen Begleitung pro Beat zu stark.
 _SHEET_SUFFIXES = ("", "m", "7", "m7")
@@ -3374,7 +3380,7 @@ def _wrap_words(words, width):
 
 
 def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
-                      gap_instr=4.0):
+                      gap_instr=4.0, chord_lead=CHORD_LEAD):
     """Baut aus Text-Zeilen (mit Wort-Zeitstempeln) und der Akkordfolge ein
     Chord-Sheet im Ultimate-Guitar-Stil. Rueckgabe (text, chordpro):
       * text: Akkordzeile ueber der Textzeile (Monospace),
@@ -3382,7 +3388,16 @@ def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
     Eigenschaften: lange Gesangszeilen werden umbrochen (width); zu Beginn jeder
     Zeile steht der gerade klingende Akkord, danach nur die Wechsel; Intro-,
     Zwischen- und Schluss-Instrumentalteile bekommen eine eigene Akkordzeile
-    (nur, wenn die Pause >= gap_instr Sekunden ist)."""
+    (nur, wenn die Pause >= gap_instr Sekunden ist).
+
+    chord_lead (Sekunden) zieht ALLE Akkorde um diesen Betrag nach vorne. Whisper
+    setzt gesungene Wortanfaenge tendenziell etwas zu spaet, wodurch die Akkorde
+    optisch hinter der richtigen Silbe landen -- ein kleiner Vorlauf rueckt sie auf
+    die passende Silbe."""
+    if chord_lead:
+        chords = [{"start": c["start"] - chord_lead,
+                   "end": c["end"] - chord_lead, "chord": c["chord"]}
+                  for c in chords]
     valid = [c for c in chords if c["chord"] and c["chord"] != "—"]
     head = []
     if title:

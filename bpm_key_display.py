@@ -1929,13 +1929,14 @@ class DisplayApp:
             self._material_res = (None, str(e))
 
     def _open_sheet_window(self, res):
-        """Zeigt das fertige Chord-Sheet (Monospace) und bietet Speichern als
-        Textdatei bzw. ChordPro."""
+        """Zeigt das fertige Chord-Sheet (Monospace), erlaubt das Feinjustieren
+        des Akkord-Versatzes (Whisper setzt gesungene Wortanfaenge mal etwas frueh/
+        spaet) und bietet Speichern als Textdatei bzw. ChordPro."""
         win = tk.Toplevel(self.root)
         title = res.get("title") or "Song-Sheet"
         win.title(f"Song-Sheet – {title}")
         win.configure(bg=COL_BG)
-        win.geometry("780x560")
+        win.geometry("780x580")
         meta = []
         if res.get("key"):
             meta.append(res["key"])
@@ -1954,16 +1955,36 @@ class DisplayApp:
                       font=("Courier", 11), yscrollcommand=sb.set)
         txt.pack(side="left", fill="both", expand=True)
         sb.config(command=txt.yview)
-        txt.insert("1.0", res.get("text", ""))
-        txt.config(state="disabled")
+
+        # Live nachregelbarer Akkord-Versatz (nur, wenn lines+chords vorliegen)
+        can_adjust = res.get("lines") is not None and res.get("chords") is not None
+        state = {"lead": float(getattr(core, "CHORD_LEAD", 0.0)),
+                 "text": res.get("text", ""), "chordpro": res.get("chordpro", "")}
+
+        def _render():
+            if can_adjust:
+                state["text"], state["chordpro"] = core.build_chord_sheet(
+                    res["lines"], res["chords"], title=title,
+                    key=res.get("key", ""), bpm=res.get("bpm", 0.0),
+                    chord_lead=state["lead"])
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("1.0", state["text"])
+            txt.config(state="disabled")
+            if can_adjust:
+                leadlbl.config(text=f"Akkord-Versatz: {state['lead'] * 1000:+.0f} ms")
+
+        def _nudge(d):
+            state["lead"] = max(-2.0, min(2.0, state["lead"] + d))
+            _render()
 
         def _save(kind):
             if kind == "chordpro":
-                content = res.get("chordpro", "")
+                content = state["chordpro"]
                 fname = core.sanitize_filename(title) + ".chordpro"
                 types = [("ChordPro", "*.chordpro *.cho *.pro"), ("Alle", "*.*")]
             else:
-                content = res.get("text", "")
+                content = state["text"]
                 fname = core.sanitize_filename(title) + ".txt"
                 types = [("Textdatei", "*.txt"), ("Alle", "*.*")]
             cfg = load_config()
@@ -1978,6 +1999,18 @@ class DisplayApp:
                 save_config({**cfg, "last_save_dir": os.path.dirname(p)})
             except Exception as e:
                 messagebox.showerror("Speichern", f"Konnte nicht speichern:\n{e}")
+
+        if can_adjust:
+            adj = tk.Frame(win, bg=COL_BG)
+            adj.pack(pady=(6, 0))
+            self._small_button(adj, "◀ Akkorde früher",
+                               lambda: _nudge(0.1)).pack(side="left", padx=4)
+            leadlbl = tk.Label(adj, text="", font=self.f_tiny, bg=COL_BG,
+                               fg=COL_MUTED, width=20)
+            leadlbl.pack(side="left", padx=4)
+            self._small_button(adj, "Akkorde später ▶",
+                               lambda: _nudge(-0.1)).pack(side="left", padx=4)
+        _render()
 
         ctl = tk.Frame(win, bg=COL_BG)
         ctl.pack(pady=8)

@@ -123,7 +123,10 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   **Modellgröße** ab) bzw. `--sheet DATEI [--out ORDNER]
   [--lang de|en] [--whisper small|medium|large-v3]` in der Konsole. Das Ergebnis
   wird in einem Fenster angezeigt und lässt sich als **Textdatei** und als
-  **ChordPro** (`.chordpro`, transponier-/druckbar) speichern.
+  **ChordPro** (`.chordpro`, transponier-/druckbar) speichern. Da Whisper die
+  gesungenen Wortanfänge je nach Lauf mal etwas früh/spät markiert, lässt sich der
+  **Akkord-Versatz im Fenster live nachregeln** („◀ Akkorde früher / später ▶") –
+  so sitzen die Akkorde exakt über den richtigen Silben.
   Braucht zusätzlich **`faster-whisper`** (`pip install faster-whisper`; lädt beim
   ersten Mal ein Sprachmodell) sowie `demucs`; ohne bleibt das Feature aus. Es
   wird ein **mehrsprachiges** Modell genutzt (Deutsch und Englisch gleichermaßen),
