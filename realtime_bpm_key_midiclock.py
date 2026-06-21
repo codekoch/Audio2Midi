@@ -3186,6 +3186,55 @@ def transcribe_segments(audio, sr, size="medium", language=None, log=None):
     return lines
 
 
+def snap_words_to_onsets(lines, vocals, sr, tol=0.25, log=None):
+    """Korrigiert die Whisper-Wortzeiten, indem jeder Wortanfang auf den naechsten
+    ECHTEN Einsatz (Onset) im sauberen Gesang-Stem gezogen wird (innerhalb +-tol s).
+    Whisper markiert gesungene Wortanfaenge oft etwas daneben; die Onsets der
+    isolierten Stimme liegen naeher am tatsaechlichen Silbeneinsatz -> die Akkorde
+    sitzen danach genauer ueber den Silben. Reihenfolge bleibt monoton.
+    Veraendert 'lines' in place und gibt es zurueck."""
+    try:
+        v = np.asarray(vocals, dtype=np.float32)
+        if v.ndim == 2:
+            v = v.mean(axis=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            onsets = librosa.onset.onset_detect(y=v, sr=int(sr), units="time",
+                                                backtrack=True)
+    except Exception as e:
+        _emit(log, f"Onset-Erkennung uebersprungen ({e}).")
+        return lines
+    onsets = np.asarray(onsets, dtype=float)
+    if onsets.size == 0:
+        return lines
+    moved, last = 0, -1.0
+    for ln in lines:
+        for w in ln["words"]:
+            st = w["start"]
+            i = int(np.searchsorted(onsets, st))
+            cand = []
+            if i < len(onsets):
+                cand.append(onsets[i])
+            if i > 0:
+                cand.append(onsets[i - 1])
+            if not cand:
+                last = max(last, st)
+                continue
+            near = min(cand, key=lambda o: abs(o - st))
+            if abs(near - st) <= tol and near >= last:
+                delta = near - st
+                w["start"] = float(near)
+                w["end"] = float(w["end"] + delta)
+                if abs(delta) > 1e-3:
+                    moved += 1
+                last = w["start"]
+            else:
+                last = max(last, st)
+    _emit(log, f"Wortzeiten an Gesang-Onsets justiert ({moved} verschoben, "
+               f"{len(onsets)} Onsets).")
+    return lines
+
+
 # Akkorde fuers Sheet um diesen Betrag (Sekunden) nach vorne ziehen -- gleicht den
 # leichten, systematischen Versatz aus, mit dem Whisper gesungene Wortanfaenge oft
 # etwas zu spaet markiert. Der Rest schwankt je Lauf/Song -> im Sheet-Fenster live
@@ -3380,11 +3429,14 @@ def _wrap_words(words, width):
 
 
 def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
-                      gap_instr=4.0, chord_lead=CHORD_LEAD):
+                      gap_instr=4.0, chord_lead=CHORD_LEAD, with_map=False):
     """Baut aus Text-Zeilen (mit Wort-Zeitstempeln) und der Akkordfolge ein
-    Chord-Sheet im Ultimate-Guitar-Stil. Rueckgabe (text, chordpro):
+    Chord-Sheet im Ultimate-Guitar-Stil. Rueckgabe (text, chordpro) -- bzw.
+    (text, chordpro, linemap), wenn with_map=True.
       * text: Akkordzeile ueber der Textzeile (Monospace),
-      * chordpro: ChordPro ([C]Wort), transponier-/druckbar.
+      * chordpro: ChordPro ([C]Wort), transponier-/druckbar,
+      * linemap: Liste {chord_row, lyric_row, start, end} (Tk-Zeilen, 1-basiert)
+        zum Mitlauf-Markieren der aktuellen Stelle beim Abspielen.
     Eigenschaften: lange Gesangszeilen werden umbrochen (width); zu Beginn jeder
     Zeile steht der gerade klingende Akkord, danach nur die Wechsel; Intro-,
     Zwischen- und Schluss-Instrumentalteile bekommen eine eigene Akkordzeile
@@ -3393,7 +3445,7 @@ def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
     chord_lead (Sekunden) zieht ALLE Akkorde um diesen Betrag nach vorne. Whisper
     setzt gesungene Wortanfaenge tendenziell etwas zu spaet, wodurch die Akkorde
     optisch hinter der richtigen Silbe landen -- ein kleiner Vorlauf rueckt sie auf
-    die passende Silbe."""
+    die passende Silbe. (Die Wort-/Mitlauf-Zeiten bleiben davon unberuehrt.)"""
     if chord_lead:
         chords = [{"start": c["start"] - chord_lead,
                    "end": c["end"] - chord_lead, "chord": c["chord"]}
@@ -3412,14 +3464,17 @@ def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
     if head:
         head.append("")
 
-    text_lines, cp_lines = [], []
+    text_lines, cp_lines, lmap = [], [], []
 
     def _emit_instr(t0, t1):
         seq = _chords_in_range(valid, t0, t1)
         if seq:
+            row = len(text_lines)
             text_lines.append(" ".join(seq))
             text_lines.append("")
             cp_lines.append(" ".join(f"[{c}]" for c in seq))
+            lmap.append({"chord_row": row, "lyric_row": None,
+                         "start": float(t0), "end": float(t1), "words": []})
 
     first_t = next((ln["words"][0]["start"] for ln in lines if ln["words"]), None)
     if first_t is not None and first_t > gap_instr:
@@ -3437,6 +3492,7 @@ def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
         for sub in _wrap_words(words, width):
             lyric, chordline = "", ""
             line_running = None              # Akkord am Anfang JEDER Zeile zeigen
+            wspans = []
             for w in sub:
                 active = _chord_at(valid, w["start"])
                 if active and active != line_running:
@@ -3450,11 +3506,18 @@ def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
                 if active and active != cp_running:
                     cp += f"[{active}]"
                     cp_running = active
+                c0 = len(lyric)              # Spalten des Wortes (fuer Wort-Marker)
                 lyric += w["word"] + " "
+                wspans.append({"c0": c0, "c1": c0 + len(w["word"]),
+                               "start": float(w["start"]), "end": float(w["end"])})
                 cp += w["word"] + " "
+            crow = len(text_lines)
             text_lines.append(chordline.rstrip())
             text_lines.append(lyric.rstrip())
             text_lines.append("")
+            lmap.append({"chord_row": crow, "lyric_row": crow + 1,
+                         "start": float(sub[0]["start"]),
+                         "end": float(sub[-1]["end"]), "words": wspans})
         cp_lines.append(cp.rstrip())
         prev_end = words[-1]["end"]
 
@@ -3474,7 +3537,21 @@ def build_chord_sheet(lines, chords, title="", key="", bpm=0.0, width=84,
     if cp_head:
         cp_head.append("")
     chordpro = "\n".join(cp_head + cp_lines).rstrip() + "\n"
-    return text, chordpro
+    if not with_map:
+        return text, chordpro
+    # Zeilen-Indizes auf die Tk-Zeilen des Gesamttexts umrechnen (1-basiert) und
+    # die Abdeckung luekenlos machen (jede Stelle gehoert genau einer Zeile)
+    off = len(head)
+    out = []
+    for e in lmap:
+        out.append({
+            "chord_row": e["chord_row"] + off + 1,
+            "lyric_row": (e["lyric_row"] + off + 1) if e["lyric_row"] is not None else None,
+            "start": e["start"], "end": e["end"], "words": e.get("words", [])})
+    out.sort(key=lambda e: e["start"])
+    for i in range(len(out) - 1):
+        out[i]["end"] = max(out[i]["end"], out[i + 1]["start"])
+    return text, chordpro, out
 
 
 def accompaniment_from_stems(stems):
@@ -3493,10 +3570,14 @@ def accompaniment_from_stems(stems):
 
 
 def song_sheet_from_stems(stems, sr, title="", whisper_size="medium",
-                          language=None, log=None):
+                          language=None, snap=False, log=None):
     """Chord-Sheet aus BEREITS getrennten Stems bauen (Schritte 2-4). So muss
     die teure Stem-Trennung nur einmal laufen, wenn neben dem Sheet z. B. auch
-    der Stem-Export gewuenscht ist. Rueckgabe wie song_sheet()."""
+    der Stem-Export gewuenscht ist. Rueckgabe wie song_sheet().
+    snap=True zieht die Whisper-Wortzeiten auf die naechsten Gesang-Onsets. Tests
+    zeigten KEINE verlaessliche Verbesserung (Gesang hat sehr dichte Onsets ~3/s,
+    'naechster Onset' ist eher Rauschen) -> standardmaessig AUS. Wortgenaue
+    Alignment braucht eher Forced Alignment (z. B. WhisperX/wav2vec2)."""
     vocals = stems.get("vocals")
     if vocals is None:
         raise RuntimeError("Kein Gesang-Stem erhalten (Modell ohne 'vocals'?).")
@@ -3507,6 +3588,8 @@ def song_sheet_from_stems(stems, sr, title="", whisper_size="medium",
     _emit(log, "== Gesangstext transkribieren ==")
     lines = transcribe_segments(vocals, sr, size=whisper_size,
                                 language=language, log=log)
+    if snap:
+        snap_words_to_onsets(lines, vocals, sr, log=log)
 
     _emit(log, "== Tonart + Akkorde bestimmen ==")
     acc_mono = acc.mean(axis=1) if acc.ndim == 2 else acc
@@ -3609,6 +3692,20 @@ class StemPlayer:
                     self.pos = 0
                 self.playing = True
             return self.playing
+
+    def play(self):
+        with self.lock:
+            if self.pos >= self.total:
+                self.pos = 0
+            self.playing = True
+
+    def pause(self):
+        with self.lock:
+            self.playing = False
+
+    def seek(self, sec):
+        with self.lock:
+            self.pos = max(0, min(self.total, int(float(sec) * self.sr)))
 
     def set_gain(self, k, g):
         with self.lock:

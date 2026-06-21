@@ -1145,6 +1145,7 @@ class DisplayApp:
         win.protocol("WM_DELETE_WINDOW", _close)
         self._small_button(win, "Schließen", _close).pack(pady=8)
         _upd()
+        return player
 
     def _segment_rec_thread(self):
         rec, sr = self._rec_audio, self._rec_sr
@@ -1921,6 +1922,19 @@ class DisplayApp:
                 out["sheet"] = core.song_sheet_from_stems(
                     stems, ssr, title=title, whisper_size=actions["model"],
                     language=actions["language"], log=cb)
+                # Wird kein eigener Stem-Player geoeffnet, spielt das Sheet-Fenster
+                # selbst den ganzen Mix ab (Mitlauf + Start/Stopp).
+                if not actions["play"]:
+                    mix = None
+                    for a in stems.values():
+                        a = np.asarray(a, dtype=np.float32)
+                        if mix is None:
+                            mix = a.copy()
+                        else:
+                            m = min(len(mix), len(a))
+                            mix = mix[:m] + a[:m]
+                    out["sheet"]["mix"] = mix
+                    out["sheet"]["sr"] = ssr
             if actions["play"]:
                 out["stems"], out["stem_sr"] = stems, ssr
             self._material_res = (out, None)
@@ -1928,15 +1942,30 @@ class DisplayApp:
             self._stem_log_error(log)
             self._material_res = (None, str(e))
 
-    def _open_sheet_window(self, res):
-        """Zeigt das fertige Chord-Sheet (Monospace), erlaubt das Feinjustieren
-        des Akkord-Versatzes (Whisper setzt gesungene Wortanfaenge mal etwas frueh/
-        spaet) und bietet Speichern als Textdatei bzw. ChordPro."""
+    def _open_sheet_window(self, res, player=None):
+        """Zeigt das fertige Chord-Sheet (Monospace). Erlaubt das Feinjustieren
+        des Akkord-Versatzes, Start/Stopp der Wiedergabe und markiert beim
+        Abspielen die aktuelle Stelle WORTGENAU (Karaoke-Mitlauf).
+        player: vorhandener StemPlayer (z. B. der Stem-Mischer); fehlt er, baut das
+        Fenster aus res['mix'] einen eigenen Player fuer Start/Stopp."""
         win = tk.Toplevel(self.root)
         title = res.get("title") or "Song-Sheet"
         win.title(f"Song-Sheet – {title}")
         win.configure(bg=COL_BG)
-        win.geometry("780x580")
+        win.geometry("780x600")
+
+        # Eigenen Mix-Player bauen, falls keiner uebergeben wurde
+        owns_player = False
+        if player is None and res.get("mix") is not None:
+            try:
+                player = core.StemPlayer([res["mix"]], res.get("sr", 44100),
+                                         names=["Song"])
+                player.start_stream()
+                owns_player = True
+                self._stem_players.append(player)
+            except Exception:
+                player = None
+
         meta = []
         if res.get("key"):
             meta.append(res["key"])
@@ -1955,24 +1984,55 @@ class DisplayApp:
                       font=("Courier", 11), yscrollcommand=sb.set)
         txt.pack(side="left", fill="both", expand=True)
         sb.config(command=txt.yview)
+        txt.tag_configure("line", background="#1d3a2e")            # aktuelle Zeile
+        txt.tag_configure("word", background="#2f8f6b", foreground="#06231a")
 
-        # Live nachregelbarer Akkord-Versatz (nur, wenn lines+chords vorliegen)
         can_adjust = res.get("lines") is not None and res.get("chords") is not None
         state = {"lead": float(getattr(core, "CHORD_LEAD", 0.0)),
-                 "text": res.get("text", ""), "chordpro": res.get("chordpro", "")}
+                 "text": res.get("text", ""), "chordpro": res.get("chordpro", ""),
+                 "map": [], "cur": None}
 
         def _render():
             if can_adjust:
-                state["text"], state["chordpro"] = core.build_chord_sheet(
-                    res["lines"], res["chords"], title=title,
-                    key=res.get("key", ""), bpm=res.get("bpm", 0.0),
-                    chord_lead=state["lead"])
+                state["text"], state["chordpro"], state["map"] = \
+                    core.build_chord_sheet(
+                        res["lines"], res["chords"], title=title,
+                        key=res.get("key", ""), bpm=res.get("bpm", 0.0),
+                        chord_lead=state["lead"], with_map=True)
             txt.config(state="normal")
             txt.delete("1.0", "end")
             txt.insert("1.0", state["text"])
             txt.config(state="disabled")
+            state["cur"] = None
             if can_adjust:
                 leadlbl.config(text=f"Akkord-Versatz: {state['lead'] * 1000:+.0f} ms")
+
+        def _highlight(t):
+            if t is None:
+                return
+            entry = None
+            for e in state["map"]:
+                if e["start"] <= t < e["end"]:
+                    entry = e
+                    break
+            if entry is not state["cur"]:           # Zeile gewechselt
+                state["cur"] = entry
+                txt.tag_remove("line", "1.0", "end")
+                if entry is not None:
+                    for r in (entry.get("chord_row"), entry.get("lyric_row")):
+                        if r:
+                            txt.tag_add("line", f"{r}.0", f"{r}.end")
+                    lr = entry.get("lyric_row")
+                    if lr:
+                        txt.see(f"{lr}.0")
+            # Wort-genaue Markierung innerhalb der Zeile
+            txt.tag_remove("word", "1.0", "end")
+            if entry is not None and entry.get("lyric_row"):
+                lr = entry["lyric_row"]
+                for w in entry.get("words", []):
+                    if w["start"] <= t < w["end"]:
+                        txt.tag_add("word", f"{lr}.{w['c0']}", f"{lr}.{w['c1']}")
+                        break
 
         def _nudge(d):
             state["lead"] = max(-2.0, min(2.0, state["lead"] + d))
@@ -2000,6 +2060,26 @@ class DisplayApp:
             except Exception as e:
                 messagebox.showerror("Speichern", f"Konnte nicht speichern:\n{e}")
 
+        # --- Transport (Start/Stopp/Anfang) ---
+        if player is not None:
+            trans = tk.Frame(win, bg=COL_BG)
+            trans.pack(pady=(6, 0))
+            playbtn = tk.Button(trans, text="▶", font=self.f_btn, bg=COL_SURFACE,
+                                fg=COL_FG, activebackground=COL_SURF_HI,
+                                activeforeground=COL_FG, bd=0, padx=18, pady=4,
+                                highlightthickness=0, cursor="hand2",
+                                command=lambda: player.toggle())
+            playbtn.pack(side="left", padx=(0, 8))
+
+            def _restart():
+                player.seek(0.0)
+                player.play()
+            self._small_button(trans, "⏮ Anfang", _restart).pack(side="left", padx=4)
+            poslbl = tk.Label(trans, text="0:00 / 0:00", font=self.f_small,
+                              bg=COL_BG, fg=COL_MUTED)
+            poslbl.pack(side="left", padx=10)
+
+        # --- Akkord-Versatz ---
         if can_adjust:
             adj = tk.Frame(win, bg=COL_BG)
             adj.pack(pady=(6, 0))
@@ -2012,13 +2092,40 @@ class DisplayApp:
                                lambda: _nudge(-0.1)).pack(side="left", padx=4)
         _render()
 
+        # --- Mitlauf-Schleife (Position -> Markierung + Transport-Anzeige) ---
+        if player is not None:
+            def _follow():
+                if not win.winfo_exists():
+                    return
+                try:
+                    pos, total = player.position()
+                    playbtn.config(text="⏸" if player.is_playing() else "▶")
+                    poslbl.config(text=f"{self._fmt_pos(pos)} / {self._fmt_pos(total)}")
+                    if player.is_playing():
+                        _highlight(pos)
+                except Exception:
+                    pass
+                win.after(120, _follow)
+            _follow()
+
+        def _close():
+            if owns_player and player is not None:
+                try:
+                    player.stop()
+                except Exception:
+                    pass
+                if player in self._stem_players:
+                    self._stem_players.remove(player)
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _close)
         ctl = tk.Frame(win, bg=COL_BG)
         ctl.pack(pady=8)
         self._small_button(ctl, "Als Text speichern …",
                            lambda: _save("text")).pack(side="left", padx=6)
         self._small_button(ctl, "Als ChordPro speichern …",
                            lambda: _save("chordpro")).pack(side="left", padx=6)
-        self._small_button(ctl, "Schließen", win.destroy).pack(side="left", padx=6)
+        self._small_button(ctl, "Schließen", _close).pack(side="left", padx=6)
 
     def on_setup_start(self):
         sel = self.lb_in.curselection()
@@ -2254,12 +2361,14 @@ class DisplayApp:
                 msgs = []
                 if out.get("export_paths"):
                     msgs.append(f"{len(out['export_paths'])} Stems gespeichert")
-                if out.get("sheet"):
-                    self._open_sheet_window(out["sheet"])
-                    msgs.append("Song-Sheet erstellt")
+                # Stem-Player zuerst -> seine Position kann das Sheet mitlaufen lassen
+                player = None
                 if out.get("stems"):
-                    self._open_stem_player(out["stems"], out["stem_sr"])
+                    player = self._open_stem_player(out["stems"], out["stem_sr"])
                     msgs.append("Stem-Player offen")
+                if out.get("sheet"):
+                    self._open_sheet_window(out["sheet"], player=player)
+                    msgs.append("Song-Sheet erstellt")
                 if msgs:
                     self.err_label.config(text="Fertig: " + ", ".join(msgs))
                 # MIDI-Clock (nur Datei) erst jetzt starten, nach der Verarbeitung

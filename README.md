@@ -126,7 +126,11 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   **ChordPro** (`.chordpro`, transponier-/druckbar) speichern. Da Whisper die
   gesungenen Wortanfänge je nach Lauf mal etwas früh/spät markiert, lässt sich der
   **Akkord-Versatz im Fenster live nachregeln** („◀ Akkorde früher / später ▶") –
-  so sitzen die Akkorde exakt über den richtigen Silben.
+  so sitzen die Akkorde exakt über den richtigen Silben. Das Sheet-Fenster hat
+  außerdem eine eigene **Start/Stopp-Wiedergabe** (▶/⏸, ⏮ Anfang) und markiert beim
+  Abspielen die aktuelle Stelle **wortgenau** (Karaoke-Mitlauf): die laufende Zeile
+  wird hervorgehoben und mitgescrollt, das gerade gesungene Wort zusätzlich betont –
+  so kann man Text und Akkorde direkt mitlesen/mitspielen.
   Braucht zusätzlich **`faster-whisper`** (`pip install faster-whisper`; lädt beim
   ersten Mal ein Sprachmodell) sowie `demucs`; ohne bleibt das Feature aus. Es
   wird ein **mehrsprachiges** Modell genutzt (Deutsch und Englisch gleichermaßen),
