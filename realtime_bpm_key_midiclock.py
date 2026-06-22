@@ -3089,6 +3089,9 @@ def separate_stems_array(audio, sr, model="htdemucs", log=None):
 # ======================================================================
 _whisper_model = None
 _whisper_kind = None      # "faster" | "openai"
+# WhisperX wird nur fuers Forced Alignment genutzt (Transkription macht
+# faster-whisper). Cache: Sprache -> (align_model, metadata).
+_whisperx_align = {}
 
 
 def whisper_available():
@@ -3128,11 +3131,14 @@ def _get_whisper(size="small", log=None):
     return _whisper_model, _whisper_kind
 
 
-def transcribe_segments(audio, sr, size="medium", language=None, log=None):
+def transcribe_segments(audio, sr, size="medium", language=None, log=None,
+                        lang_out=None):
     """Transkribiert (gesungenen) Text mit Wort-Zeitstempeln. audio: np.ndarray
     (mono oder (frames, ch)) -- wird zu Mono/16 kHz gewandelt. Rueckgabe: Liste
     von Zeilen [{'text', 'words': [{'word','start','end'}, ...]}, ...]; die
     Zeilen entsprechen den Whisper-Segmenten (natuerliche Gesangs-Phrasen).
+    lang_out: optionale Liste -- die erkannte Sprache wird angehaengt (fuer
+    Aufrufer, die den Sprachcode brauchen, z. B. das Forced Alignment).
 
     language: ISO-Code ('de', 'en', ...) erzwingt die Sprache -- bei Gesang
     DRINGEND empfohlen, weil die automatische Spracherkennung an Musik gerne
@@ -3159,6 +3165,8 @@ def transcribe_segments(audio, sr, size="medium", language=None, log=None):
             vad_filter=True, condition_on_previous_text=False)
         lang = getattr(info, "language", None)
         if lang:
+            if lang_out is not None:
+                lang_out.append(lang)
             _emit(log, f"Sprache: {lang}"
                        + ("" if language else " (automatisch erkannt)"))
         for seg in segments:                # Generator -> hier laeuft die KI
@@ -3171,6 +3179,8 @@ def transcribe_segments(audio, sr, size="medium", language=None, log=None):
         res = m.transcribe(y, word_timestamps=True, language=language,
                            condition_on_previous_text=False)
         if res.get("language"):
+            if lang_out is not None:
+                lang_out.append(res["language"])
             _emit(log, f"Sprache: {res['language']}"
                        + ("" if language else " (automatisch erkannt)"))
         for seg in res.get("segments", []):
@@ -3184,6 +3194,94 @@ def transcribe_segments(audio, sr, size="medium", language=None, log=None):
     nwords = sum(len(l["words"]) for l in lines)
     _emit(log, f"{nwords} Woerter in {len(lines)} Zeilen erkannt.")
     return lines
+
+
+def whisperx_available():
+    """WhisperX (Forced Alignment per wav2vec2) installiert? -> praezisere
+    Wort-Zeitstempel als die rohen Whisper-Zeiten."""
+    import importlib.util as _u
+    return _u.find_spec("whisperx") is not None
+
+
+def _fill_word_times(words, seg_start, seg_end):
+    """Loecher in den Wort-Zeiten schliessen (WhisperX richtet einzelne Woerter
+    wie Zahlen/Satzzeichen nicht immer aus) -- damit kein Wort verloren geht."""
+    n = len(words)
+    for i, w in enumerate(words):
+        if w.get("start") is None:
+            w["start"] = words[i - 1]["end"] if i > 0 and words[i - 1].get("end") \
+                is not None else seg_start
+        if w.get("end") is None:
+            nxt = None
+            for j in range(i + 1, n):
+                if words[j].get("start") is not None:
+                    nxt = words[j]["start"]
+                    break
+            w["end"] = nxt if nxt is not None else seg_end
+        if w["end"] < w["start"]:
+            w["end"] = w["start"]
+    return words
+
+
+def transcribe_aligned(audio, sr, size="medium", language=None, log=None):
+    """Transkription MIT Forced Alignment -- kombiniert die Staerken beider Tools:
+      * die SEGMENTIERUNG (Phrasen-Zeilen) kommt von faster-whisper, das sauber an
+        gesungenen Phrasen schneidet (gut lesbares Sheet),
+      * das praezise WORT-TIMING vom WhisperX/wav2vec2-Alignment, das die Woerter
+        jeder Phrase exakt an der Audiozeit ausrichtet (Akkorde ueber den Silben).
+    (WhisperX' eigenes transcribe wuerde grobe VAD-Bloecke liefern -> unlesbar.)
+    Rueckgabe wie transcribe_segments(). Faellt bei Problemen NICHT still aus --
+    der Aufrufer soll dann auf transcribe_segments() zurueckgreifen."""
+    global _whisperx_align
+    import whisperx
+    import torch
+    # 1) Transkription + natuerliche Phrasen-Segmente von faster-whisper
+    lang_box = []
+    lines = transcribe_segments(audio, sr, size=size, language=language,
+                                log=log, lang_out=lang_box)
+    if not lines:
+        return lines
+    lang = (language if language not in ("", "auto", None)
+            else (lang_box[0] if lang_box else None) or "en")
+    # 2) Audio fuers Alignment auf Mono/16 kHz bringen
+    y = np.asarray(audio, dtype=np.float32)
+    if y.ndim == 2:
+        y = y.mean(axis=1)
+    if int(sr) != 16000:
+        y = librosa.resample(y, orig_sr=int(sr), target_sr=16000)
+    y = np.ascontiguousarray(y, dtype=np.float32)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    # 3) Ausrichtmodell (je Sprache, gecacht)
+    _emit(log, f"Richte Woerter aus (Forced Alignment, '{lang}') …")
+    if lang not in _whisperx_align:
+        _emit(log, f"Lade Ausrichtmodell fuer '{lang}' (einmalig, ~300-400 MB) – "
+                   "das kann je nach Verbindung einige Minuten dauern. "
+                   "Es haengt NICHT, der Download laeuft im Hintergrund.")
+        _whisperx_align[lang] = whisperx.load_align_model(language_code=lang,
+                                                          device=dev)
+        _emit(log, "Ausrichtmodell geladen (ab jetzt aus dem Cache).")
+    align_model, metadata = _whisperx_align[lang]
+    # 4) faster-whisper-Segmente -> Align-Eingabe (Phrasen bleiben Zeilen)
+    segs = [{"start": ln["words"][0]["start"], "end": ln["words"][-1]["end"],
+             "text": ln["text"]} for ln in lines if ln["words"]]
+    aligned = whisperx.align(segs, align_model, metadata, y, dev,
+                             return_char_alignments=False)
+    # 5) Zeilen mit den praezisen Wortzeiten neu aufbauen (Segment = Zeile)
+    out = []
+    for seg in aligned.get("segments", []):
+        raw = [w for w in seg.get("words", []) if (w.get("word") or "").strip()]
+        raw = _fill_word_times(raw, float(seg.get("start", 0.0)),
+                               float(seg.get("end", 0.0)))
+        words = [{"word": w["word"].strip(), "start": float(w["start"]),
+                  "end": float(w["end"])} for w in raw]
+        if words:
+            out.append({"text": (seg.get("text") or "").strip(), "words": words})
+    if not out:
+        _emit(log, "Alignment ohne Woerter – nutze faster-whisper-Zeiten.")
+        return lines
+    nwords = sum(len(l["words"]) for l in out)
+    _emit(log, f"{nwords} Woerter in {len(out)} Phrasen-Zeilen ausgerichtet.")
+    return out
 
 
 def snap_words_to_onsets(lines, vocals, sr, tol=0.25, log=None):
@@ -3586,10 +3684,20 @@ def song_sheet_from_stems(stems, sr, title="", whisper_size="medium",
         acc = np.asarray(vocals, dtype=np.float32)   # Notnagel
 
     _emit(log, "== Gesangstext transkribieren ==")
-    lines = transcribe_segments(vocals, sr, size=whisper_size,
-                                language=language, log=log)
-    if snap:
-        snap_words_to_onsets(lines, vocals, sr, log=log)
+    lines = None
+    if whisperx_available():
+        # Forced Alignment -> praezise Wortzeiten (Akkorde genauer ueber Silben)
+        try:
+            lines = transcribe_aligned(vocals, sr, size=whisper_size,
+                                       language=language, log=log)
+        except Exception as e:
+            _emit(log, f"WhisperX fehlgeschlagen ({e}) – nutze faster-whisper.")
+            lines = None
+    if lines is None:
+        lines = transcribe_segments(vocals, sr, size=whisper_size,
+                                    language=language, log=log)
+        if snap:
+            snap_words_to_onsets(lines, vocals, sr, log=log)
 
     _emit(log, "== Tonart + Akkorde bestimmen ==")
     acc_mono = acc.mean(axis=1) if acc.ndim == 2 else acc

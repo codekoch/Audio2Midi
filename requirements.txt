@@ -17,3 +17,7 @@ soundcard; sys_platform == 'win32'
 # Optional: Song-Sheet (Gesangstext + Akkorde). Braucht zusaetzlich eine lokale
 # Whisper-KI fuer die Transkription (laedt beim ersten Mal ein Sprachmodell):
 #   pip install faster-whisper
+# Optional (empfohlen fuers Song-Sheet): WhisperX = Whisper + Forced Alignment
+# (wav2vec2) -> praezise Wort-Zeitstempel, damit die Akkorde exakt ueber den
+# Silben sitzen. Ersetzt faster-whisper nicht, sondern nutzt es:
+#   pip install whisperx

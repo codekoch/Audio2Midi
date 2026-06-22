@@ -134,7 +134,15 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   Braucht zusätzlich **`faster-whisper`** (`pip install faster-whisper`; lädt beim
   ersten Mal ein Sprachmodell) sowie `demucs`; ohne bleibt das Feature aus. Es
   wird ein **mehrsprachiges** Modell genutzt (Deutsch und Englisch gleichermaßen),
-  Standard ist „medium". **Tipp:** Bei bekanntem Gesang die Sprache fest wählen –
+  Standard ist „medium". Ist zusätzlich **`whisperx`** installiert
+  (`pip install whisperx`), wird automatisch **Forced Alignment** (wav2vec2)
+  genutzt: faster-whisper liefert den Text **und die Phrasen-Zeilen** (sauber
+  geschnitten, eine Phrase pro Zeile), WhisperX richtet die **Wörter präzise**
+  daran aus – so sitzen die Akkorde genauer über den richtigen Silben **und** das
+  Sheet bleibt gut lesbar. Beim ersten Lauf je Sprache lädt WhisperX einmalig ein
+  ~300–400 MB großes Ausrichtmodell (Fortschritt steht im Log); danach aus dem
+  Cache. Ohne whisperx laufen die reinen Whisper-Zeiten (gröber, dafür mit dem
+  Versatz-Regler justierbar). **Tipp:** Bei bekanntem Gesang die Sprache fest wählen –
   die automatische Spracherkennung liegt bei Musik gern daneben (ein deutsches
   Lied wird sonst als Englisch „übersetzt"). Hinweise: gesungener Text wird „gut,
   aber nicht fehlerfrei" erkannt, die Akkorde sind eine Approximation (kein
