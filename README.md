@@ -58,7 +58,10 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   Song weg. Bei konstantem Tempo entsteht ein perfekt gleichmäßiges Raster über
   die ganze Datei. In der GUI über die Schaltfläche „Datei …" (auch im
   Einstellungsbildschirm), in der Konsole über `--file DATEI`. Mirror des
-  gleichnamigen Modus der Webversion.
+  gleichnamigen Modus der Webversion. Die Wiedergabe startet **nicht** von allein,
+  sondern über einen **▶ Start / ■ Stopp**-Knopf – so beginnt die MIDI-Clock genau
+  dann, wenn man es will (Stopp sendet ein MIDI-Stop; erneutes Start spielt von
+  vorn).
 - **Aufnahme + Speichern** (optional) – das live analysierte Signal lässt sich
   mitschneiden (GUI-Schaltfläche „● Aufnahme", Konsole Taste `r`) und danach als
   WAV speichern. Enthält der Mitschnitt **mehrere Stücke** (kurze Stille +

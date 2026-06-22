@@ -176,6 +176,9 @@ class DisplayApp:
         self.file_clock_stop = None
         self.file_clock_thread = None
         self.file_midi = None                 # eigener MIDI-Ausgang im Datei-Modus
+        self.file_audio = None                # dekodierter Puffer (fuer Start/Stop)
+        self.file_sr = 0                      # dessen Samplerate
+        self._file_playing = False            # laeuft die Datei-Wiedergabe gerade?
         self.file_info = None                 # Beat-Map-dict (beats/ticks/bpm/...)
         self.file_name = ""
         self.file_key = "—"
@@ -392,6 +395,9 @@ class DisplayApp:
         self.rec_btn.pack(side="left", padx=(8, 0))
         self.dj_btn = _ctl(row2, "DJ", self.open_dj)
         self.dj_btn.pack(side="left", padx=(8, 0))
+        # Transport fuer den Datei-Modus (Start/Stopp der Wiedergabe + Clock);
+        # nur im Datei-Modus sichtbar (sonst laeuft die Datei nicht von allein los).
+        self.file_play_btn = _ctl(row2, "▶ Start", self._file_toggle)
 
     def _small_button(self, parent, text, cmd):
         return tk.Button(parent, text=text, command=cmd, font=self.f_small,
@@ -804,13 +810,30 @@ class DisplayApp:
         self._file_begin_args = ("ok", gen, (audio, sr_play, info, key, key_conf))
 
     def _file_begin(self, audio, sr_play, info, key, key_conf):
-        """Main-Thread: MIDI oeffnen, Wiedergabe + driftfreie Clock starten."""
+        """Main-Thread: Datei ist analysiert -> Wiedergabe VORBEREITEN, aber NICHT
+        automatisch starten. Der Transport-Button (▶ Start / ■ Stopp) steuert sie."""
         if self.app_stop.is_set() or not self.file_mode:
             return
+        self.file_audio = audio
+        self.file_sr = sr_play
         self.file_info = info
         self.file_key = key
         self.file_key_conf = key_conf
-        # MIDI-Ausgang aus der Konfiguration (wie im Live-Betrieb)
+        self._file_playing = False
+        # Hold/Reset/Aufnahme gelten nur im Live-Betrieb
+        self.hold_btn.config(state="disabled")
+        self.reset_btn.config(state="disabled")
+        self.rec_btn.config(state="disabled")
+        self.db_label.config(width=13)
+        self.status_override = None
+        self.file_play_btn.config(text="▶ Start", state="normal")
+        if not self.file_play_btn.winfo_ismapped():
+            self.file_play_btn.pack(side="left", padx=(8, 0))
+
+    def _file_start_playback(self):
+        """Datei-Wiedergabe + driftfreie MIDI-Clock starten (ab Position 0)."""
+        if self.file_audio is None or self._file_playing:
+            return
         self.file_midi = None
         cfg = load_config()
         midi_name = cfg.get("midi_output") or None
@@ -821,7 +844,7 @@ class DisplayApp:
             except Exception:
                 self.file_midi = None
         try:
-            self.file_player = core.FilePlayer(audio, sr_play)
+            self.file_player = core.FilePlayer(self.file_audio, self.file_sr)
             self.file_player.start()
         except Exception as e:
             if self.file_midi is not None:
@@ -830,24 +853,22 @@ class DisplayApp:
                 except Exception:
                     pass
                 self.file_midi = None
-            self.file_mode = False
-            self.status_override = None
-            self.show_setup(error=f"Wiedergabe fehlgeschlagen: {e}")
+            self.file_player = None
+            self.status_label.config(text=f"Wiedergabe fehlgeschlagen: {e}",
+                                     fg=COL_WARN)
             return
         self.file_clock_stop = threading.Event()
         self.file_clock_thread = threading.Thread(
             target=core.file_clock_worker,
-            args=(self.shared, self.file_player, info["ticks"], self.file_midi,
-                  self.file_clock_stop), daemon=True)
+            args=(self.shared, self.file_player, self.file_info["ticks"],
+                  self.file_midi, self.file_clock_stop), daemon=True)
         self.file_clock_thread.start()
-        # Hold/Reset/Aufnahme gelten nur im Live-Betrieb
-        self.hold_btn.config(state="disabled")
-        self.reset_btn.config(state="disabled")
-        self.rec_btn.config(state="disabled")
-        self.db_label.config(width=13)
-        self.status_override = None
+        self._file_playing = True
+        self.file_play_btn.config(text="■ Stopp")
 
-    def stop_file(self):
+    def _file_stop_playback(self):
+        """Wiedergabe + Clock anhalten (MIDI-Stop), aber IM Datei-Modus bleiben --
+        erneutes Start spielt von vorne."""
         if self.file_clock_stop is not None:
             self.file_clock_stop.set()
         if self.file_clock_thread is not None:
@@ -865,10 +886,30 @@ class DisplayApp:
             except Exception:
                 pass
             self.file_midi = None
+        self._file_playing = False
+        try:
+            if self.file_mode:
+                self.file_play_btn.config(text="▶ Start")
+        except Exception:
+            pass
+
+    def _file_toggle(self):
+        if not self.file_mode:
+            return
+        if self._file_playing:
+            self._file_stop_playback()
+        else:
+            self._file_start_playback()
+
+    def stop_file(self):
+        """Datei-Modus KOMPLETT verlassen (Wiedergabe beenden + aufraeumen)."""
+        self._file_stop_playback()
         self.file_mode = False
         self.file_info = None
+        self.file_audio = None
         self._file_begin_args = None
         try:
+            self.file_play_btn.pack_forget()
             self.hold_btn.config(state="normal")
             self.reset_btn.config(state="normal")
             self.rec_btn.config(state="normal")
@@ -879,16 +920,18 @@ class DisplayApp:
 
     def _tick_file(self):
         """Anzeige im Datei-Modus: BPM aus dem Beat-Raster an der aktuellen
-        Wiedergabeposition, Tonart aus der Vorab-Schaetzung, Fortschrittsbalken."""
-        player, info = self.file_player, self.file_info
-        if player is None or info is None:
+        Wiedergabeposition, Tonart aus der Vorab-Schaetzung, Fortschrittsbalken.
+        Ohne laufende Wiedergabe (vor ▶ Start / nach ■ Stopp / am Ende) wird die
+        Position 0 angezeigt und auf den Start gewartet."""
+        info = self.file_info
+        if info is None:
             return
-        if player.is_done():
-            self.stop_file()
-            self.show_setup()
-            return
+        player = self.file_player
+        if player is not None and player.is_done():
+            self._file_stop_playback()           # am Ende: zurueck auf "▶ Start"
+            player = None
         dur = info.get("duration", 0.0) or 0.0
-        pos = max(0.0, player.play_pos())
+        pos = max(0.0, player.play_pos()) if player is not None else 0.0
         if dur > 0:
             pos = min(pos, dur)
         bpm = core.file_bpm_at(info["beats"], pos, info.get("bpm", 0.0))
@@ -897,7 +940,8 @@ class DisplayApp:
             self.bpm_label.config(font=self.f_bpm, fg=COL_FG)
             self._bpm_big = True
         self.bpm_label.config(
-            text=f"{bpm:.1f}" if self.opt_bpm_decimal else f"{bpm:.0f}", fg=COL_FG)
+            text=f"{bpm:.1f}" if self.opt_bpm_decimal else f"{bpm:.0f}",
+            fg=COL_FG if self._file_playing else COL_MUTED)
         self.key_label.config(text=self.file_key,
                               fg=COL_ACCENT if self.file_key_conf else COL_MUTED)
         par = parallel_key(self.file_key)
@@ -910,7 +954,10 @@ class DisplayApp:
         self.level_canvas.coords(self.level_rect, 0, 0, int(w * frac), 14)
         self.db_label.config(text=f"{self._fmt_pos(pos)} / {self._fmt_pos(dur)}")
         tag = "DRIFTFREI" if info.get("constant") else "VARIABEL"
-        if self.file_midi is not None:
+        if not self._file_playing:
+            self.status_label.config(text="● DATEI · BEREIT – ▶ Start drücken",
+                                     fg=COL_MUTED)
+        elif self.file_midi is not None:
             self.status_label.config(text=f"● DATEI · {tag}", fg=COL_OK)
         else:
             self.status_label.config(text=f"DATEI · {tag} · OHNE MIDI", fg=COL_MUTED)
