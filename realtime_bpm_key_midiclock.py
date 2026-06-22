@@ -2947,9 +2947,12 @@ def _load_audio_for_demucs(path, target_sr, channels):
     return np.ascontiguousarray(wav, dtype=np.float32)
 
 
-def _separate_stems_direct(path, model="htdemucs", log=None):
+def _separate_stems_direct(path, model="htdemucs", log=None, overlap=0.1):
     """Trennung ueber die Low-Level-API von Demucs, mit eigenem Audio-Laden
-    (librosa) statt torchaudio. Robust gegen fehlende demucs.api/torchcodec."""
+    (librosa) statt torchaudio. Robust gegen fehlende demucs.api/torchcodec.
+    'overlap' steuert Geschwindigkeit/Qualitaet: 0.1 = schnell (gut genug fuer
+    Transkription/Akkorde), 0.25 = Demucs-Standard (volle Qualitaet, ~20 %
+    langsamer -- fuer Stem-Export und Bass->MIDI sinnvoll)."""
     import torch
     from demucs.apply import apply_model
     m = _get_model_direct(model, log=log)
@@ -2962,7 +2965,9 @@ def _separate_stems_direct(path, model="htdemucs", log=None):
     _emit(log, f"Trennung laeuft (direkt, {dev.upper()}) … "
                "das kann je nach Laenge und CPU einige Minuten dauern.")
     with torch.no_grad():
-        sources = apply_model(m, wt[None], device=dev, progress=False)[0]
+        # overlap 0.1 (schnell) vs. 0.25 (Demucs-Standard, volle Qualitaet).
+        sources = apply_model(m, wt[None], device=dev, progress=False,
+                              overlap=float(overlap))[0]
     sources = sources * ref.std() + ref.mean()
     out = {}
     for name, src in zip(m.sources, sources):
@@ -3008,9 +3013,12 @@ def _separate_stems_cli(path, model="htdemucs", log=None):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def separate_stems(path, model="htdemucs", log=None):
+def separate_stems(path, model="htdemucs", log=None, overlap=0.1):
     """Trennt eine Audiodatei lokal per Demucs. Rueckgabe (dict {name:
     (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell).
+
+    'overlap': 0.1 = schnell (Default, fuer Song-Sheet ausreichend), 0.25 =
+    Demucs-Standard/volle Qualitaet (fuer Stem-Export oder Bass->MIDI).
 
     Drei Wege, vom robustesten zum ausweichendsten:
       1) direkt (eigenes Audio-Laden per librosa, ohne torchaudio) -- laeuft
@@ -3023,7 +3031,9 @@ def separate_stems(path, model="htdemucs", log=None):
                       ("API", _separate_stems_api),
                       ("CLI", _separate_stems_cli)):
         try:
-            return fn(path, model, log=log)
+            if label == "direkt":
+                return fn(path, model, log=log, overlap=overlap)
+            return fn(path, model, log=log)    # Ausweichwege: ohne overlap
         except Exception as e:
             errors.append(f"{label}: {e}")
             _emit(log, f"Weg '{label}' fehlgeschlagen ({e}).")
@@ -3052,17 +3062,19 @@ def write_stems_to_files(stems, sr, out_dir, base="stems", log=None):
     return written
 
 
-def separate_stems_to_files(path, out_dir, model="htdemucs", base=None, log=None):
+def separate_stems_to_files(path, out_dir, model="htdemucs", base=None, log=None,
+                            overlap=0.25):
     """Trennt eine Datei und speichert die Spuren als einzelne WAVs.
-    Rueckgabe: Liste der geschriebenen Pfade."""
+    Rueckgabe: Liste der geschriebenen Pfade. Default overlap=0.25 (volle
+    Qualitaet) -- exportierte Stems will man in bester Qualitaet."""
     if sf is None:
         raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
-    stems, sr = separate_stems(path, model, log=log)
+    stems, sr = separate_stems(path, model, log=log, overlap=overlap)
     base = base or os.path.splitext(os.path.basename(path))[0]
     return write_stems_to_files(stems, sr, out_dir, base=base, log=log)
 
 
-def separate_stems_array(audio, sr, model="htdemucs", log=None):
+def separate_stems_array(audio, sr, model="htdemucs", log=None, overlap=0.1):
     """Wie separate_stems, aber fuer ein In-Memory-Signal (z. B. eine Aufnahme):
     schreibt eine Temp-WAV und trennt diese. Rueckgabe (dict, sr)."""
     if sf is None:
@@ -3073,7 +3085,7 @@ def separate_stems_array(audio, sr, model="htdemucs", log=None):
     try:
         _emit(log, "Schreibe Aufnahme in eine temporaere WAV-Datei …")
         sf.write(tmp, np.asarray(audio, dtype=np.float32), int(sr), subtype='PCM_16')
-        return separate_stems(tmp, model, log=log)
+        return separate_stems(tmp, model, log=log, overlap=overlap)
     finally:
         try:
             os.remove(tmp)
@@ -3478,7 +3490,7 @@ def _chord_emissions(y, sr, bass_audio=None, beat_times=None, win_beats=2,
 
 def chord_sequence(y, sr, key=None, bass_audio=None, beat_times=None,
                    win_beats=2, min_dur=1.2, triads_only=True, simple=True,
-                   key_bias=0.12, bass_weight=None, log=None):
+                   key_bias=0.12, bass_weight=None, harmonic_sep=True, log=None):
     """Offline-Akkordfolge eines ganzen Stuecks (ueber die vorhandene Erkennung
     chroma_pcp + chord_scores). Fuer ein lesbares Sheet stabilisiert:
       * je 'win_beats' Beats EIN Akkord (Chroma ueber das Fenster gemittelt),
@@ -3488,6 +3500,9 @@ def chord_sequence(y, sr, key=None, bass_audio=None, beat_times=None,
     -- das entscheidet zwischen tonverwandten Akkorden (C vs. Am, G vs. Em) und
     behebt die haeufigste Fehlerkennung. 'bass_weight' steuert dessen Gewicht.
     Mit bekannter Tonart 'key' werden leitereigene Akkorde leicht bevorzugt.
+    'harmonic_sep': harmonischen Anteil per HPSS herausrechnen (entfernt Drums).
+    Auf bereits drum-freiem Material (z. B. other+bass aus der Stem-Trennung)
+    unnoetig -> False spart die teure HPSS (~20 s/Song).
     Rueckgabe: Liste {'start','end','chord'} (Sekunden)."""
     y = np.asarray(y, dtype=np.float32)
     if y.ndim == 2:
@@ -3507,11 +3522,14 @@ def chord_sequence(y, sr, key=None, bass_audio=None, beat_times=None,
     edges = list(bt[::max(1, int(win_beats))])
     if edges[-1] < bt[-1]:
         edges.append(float(bt[-1]))
-    _emit(log, "Trenne harmonischen Anteil (einmalig) …")
-    try:
-        yh = librosa.effects.harmonic(y, margin=4.0)
-    except Exception:
-        yh = y
+    if harmonic_sep:
+        _emit(log, "Trenne harmonischen Anteil (einmalig) …")
+        try:
+            yh = librosa.effects.harmonic(y, margin=4.0)
+        except Exception:
+            yh = y
+    else:
+        yh = y                                 # bereits drum-frei -> HPSS sparen
     # Sauberes Bass-Chromagramm aus dem Bass-Stem (falls vorhanden)
     bass_cg = None
     if bass_audio is not None:
@@ -3783,21 +3801,47 @@ def song_sheet_from_stems(stems, sr, title="", whisper_size="medium",
             snap_words_to_onsets(lines, vocals, sr, log=log)
 
     _emit(log, "== Tonart + Akkorde bestimmen ==")
-    acc_mono = acc.mean(axis=1) if acc.ndim == 2 else acc
-    bass_stem = stems.get("bass")
-    bass_mono = None
-    if bass_stem is not None:
-        b = np.asarray(bass_stem, dtype=np.float32)
-        bass_mono = b.mean(axis=1) if b.ndim == 2 else b
+
+    def _mono(a):
+        if a is None:
+            return None
+        a = np.asarray(a, dtype=np.float32)
+        return a.mean(axis=1) if a.ndim == 2 else a
+
+    bass_mono = _mono(stems.get("bass"))
+    # Stems gezielt nutzen (sie sind schon getrennt -> keine teure HPSS noetig):
+    # drum-freie Harmonie (other+bass) fuer Tonart+Akkorde, Drums fuer Tempo/Beats.
+    harm = None
+    for nm in ("other", "bass"):
+        a = _mono(stems.get(nm))
+        if a is None:
+            continue
+        harm = a.copy() if harm is None else (
+            harm[:min(len(harm), len(a))] + a[:min(len(harm), len(a))])
+    drum_free = harm is not None
+    if not drum_free:
+        harm = acc.mean(axis=1) if acc.ndim == 2 else acc   # Notnagel: mit Drums
+    tempo_src = _mono(stems.get("drums"))
+    if tempo_src is None:
+        tempo_src = harm
     try:
-        key = estimate_key(acc_mono, sr)
+        key = estimate_key(harm, sr)
     except Exception:
         key = ""
+    beats = None                               # Beats EINMAL (perkussiver Anteil)
     try:
-        bpm = float(estimate_tempo(acc_mono, sr) or 0.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _t, _frames = librosa.beat.beat_track(y=tempo_src, sr=sr)
+            beats = librosa.frames_to_time(_frames, sr=sr)
+    except Exception:
+        beats = None
+    try:
+        bpm = float(estimate_tempo(tempo_src, sr) or 0.0)
     except Exception:
         bpm = 0.0
-    chords = chord_sequence(acc_mono, sr, key=key, bass_audio=bass_mono, log=log)
+    chords = chord_sequence(harm, sr, key=key, bass_audio=bass_mono,
+                            beat_times=beats, harmonic_sep=not drum_free, log=log)
 
     _emit(log, "== Chord-Sheet zusammensetzen ==")
     lead = chord_lead_for_bpm(bpm)             # ~1 Beat Vorlauf (tempoabhaengig)

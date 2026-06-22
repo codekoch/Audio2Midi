@@ -95,7 +95,11 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   **Bass → MIDI** (siehe unten) und
   **Song-Sheet** beliebig **kombinieren** – die teure KI-Trennung läuft dabei nur
   **einmal** für alle gewählten Aktionen, und eine Aufnahme muss nicht erst als
-  Datei gespeichert werden. In der Konsole exportiert `--stems DATEI [--out ORDNER]`
+  Datei gespeichert werden. Im Dialog lässt sich die **Stem-Qualität** wählen:
+  **Automatisch** (Standard) trennt schnell, wenn nur ein Song-Sheet entsteht
+  (Text/Akkorde sind robust gegen kleine Trennartefakte), und in **voller
+  Qualität**, sobald die Stems als **Audio exportiert/abgespielt** oder zu **MIDI**
+  gewandelt werden; man kann auch fest „Hoch" oder „Schnell" erzwingen. In der Konsole exportiert `--stems DATEI [--out ORDNER]`
   die Spuren als einzelne WAVs. Braucht das zusätzliche Paket **`demucs`**
   (`pip install demucs`, zieht PyTorch); ohne bleibt das Feature einfach aus. Die
   KI-Trennung läuft offline und kann je nach CPU einige Minuten je Stück dauern.

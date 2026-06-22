@@ -1525,8 +1525,10 @@ class DisplayApp:
 
     def _dj_stems_thread(self, idx, path, log):
         try:
+            # DJ-Stems werden live abgespielt (Audio) -> volle Trennqualitaet.
             stems, sr = core.separate_stems(
-                path, model="htdemucs", log=lambda m: self._stem_log(log, m))
+                path, model="htdemucs", overlap=0.25,
+                log=lambda m: self._stem_log(log, m))
             self._dj_stems_res = (idx, stems, sr, None)
         except Exception as e:
             self._stem_log_error(log)
@@ -1880,6 +1882,10 @@ class DisplayApp:
         model_map = [("Mittel – empfohlen", "medium"),
                      ("Klein – schnell", "small"),
                      ("Groß – beste Qualität (langsam)", "large-v3")]
+        # Stem-Trennqualitaet: schnell reicht furs Song-Sheet; fuer Export/MIDI
+        # lohnt die volle Demucs-Qualitaet (~20 % langsamer).
+        qual_map = [("Automatisch", "auto"), ("Hoch – für Export/MIDI", "hi"),
+                    ("Schnell – für Song-Sheet", "fast")]
         win = tk.Toplevel(self.root)
         win.title("Was soll passieren?")
         win.configure(bg=COL_BG)
@@ -1946,8 +1952,11 @@ class DisplayApp:
 
         lvar = _menu(0, "Sheet-Sprache", lang_map, cfg.get("sheet_lang", "auto"))
         mvar = _menu(1, "Sheet-Modell", model_map, cfg.get("sheet_model", "medium"))
+        qvar = _menu(2, "Stem-Qualität", qual_map, cfg.get("stem_quality", "auto"))
         tk.Label(body, text="Tipp: Beim Song-Sheet die Sprache fest wählen – die\n"
-                 "automatische Erkennung liegt bei Gesang oft daneben.",
+                 "automatische Erkennung liegt bei Gesang oft daneben.\n"
+                 "Stem-Qualität Automatisch = hoch bei Export/Abspielen/Bass-MIDI,\n"
+                 "sonst schnell (fürs Song-Sheet reicht das).",
                  font=self.f_tiny, bg=COL_BG, fg=COL_MUTED,
                  justify="left").pack(anchor="w", pady=(8, 0))
         result = {}
@@ -1965,14 +1974,24 @@ class DisplayApp:
                     return                   # Abbruch der Ordnerwahl -> zurueck
             lang = next(v for lbl, v in lang_map if lbl == lvar.get())
             model = next(v for lbl, v in model_map if lbl == mvar.get())
-            new_cfg = {**load_config(), "sheet_lang": lang, "sheet_model": model}
+            qual = next(v for lbl, v in qual_map if lbl == qvar.get())
+            new_cfg = {**load_config(), "sheet_lang": lang, "sheet_model": model,
+                       "stem_quality": qual}
             if out_dir:
                 new_cfg["last_save_dir"] = out_dir
             save_config(new_cfg)
+            # "Automatisch": hohe Trennqualitaet, wenn die Stems als Audio/MIDI
+            # genutzt werden (Export/Abspielen/Bass-MIDI) -- sonst schnell.
+            if qual == "hi":
+                hi = True
+            elif qual == "fast":
+                hi = False
+            else:
+                hi = bool(v_export.get() or v_play.get() or v_bassmidi.get())
             result.update(clock=bool(v_clock.get()) if allow_clock else False,
                           export=bool(v_export.get()), sheet=bool(v_sheet.get()),
                           play=bool(v_play.get()), bassmidi=bool(v_bassmidi.get()),
-                          out_dir=out_dir,
+                          out_dir=out_dir, overlap=0.25 if hi else 0.1,
                           language=None if lang == "auto" else lang, model=model)
             win.destroy()
 
@@ -2016,12 +2035,14 @@ class DisplayApp:
             out = {"actions": actions, "title": title, "sheet": None,
                    "stems": None, "stem_sr": None, "export_paths": None,
                    "bass_notes": None}
-            self._stem_log(log, "== Stems trennen (einmalig) ==")
+            ov = float(actions.get("overlap", 0.1))
+            self._stem_log(log, "== Stems trennen (einmalig) == "
+                           + ("[hohe Qualität]" if ov >= 0.2 else "[schnell]"))
             if isinstance(source, tuple):            # ('array', rec, sr)
                 _tag, rec, srr = source
-                stems, ssr = core.separate_stems_array(rec, srr, log=cb)
+                stems, ssr = core.separate_stems_array(rec, srr, log=cb, overlap=ov)
             else:
-                stems, ssr = core.separate_stems(source, log=cb)
+                stems, ssr = core.separate_stems(source, log=cb, overlap=ov)
             if actions["export"]:
                 self._stem_log(log, "== Stems exportieren ==")
                 out["export_paths"] = core.write_stems_to_files(
