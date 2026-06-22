@@ -1159,6 +1159,52 @@ class DisplayApp:
 
                 mbtn.config(command=_toggle_midi)
                 mbtn.pack(side="left", padx=(16, 0))
+
+                # Mindest-Notenlaenge live nachregeln (steuert die Dichte der
+                # Bass-MIDI). Neuberechnung laeuft auf dem schon getrennten
+                # Bass-Stem (keine erneute KI-Trennung) im Hintergrund.
+                bmf = tk.Frame(win, bg=COL_BG)
+                bmf.pack(pady=(0, 8))
+                tk.Label(bmf, text="Bass-MIDI Mindestnote", font=self.f_tiny,
+                         bg=COL_BG, fg=COL_ACCENT).pack(side="left", padx=(0, 8))
+                minms = tk.IntVar(value=int(cfg.get("bass_min_ms", 130)))
+                mslbl = tk.Label(bmf, text=f"{minms.get()} ms", font=self.f_tiny,
+                                 bg=COL_BG, fg=COL_FG)
+                tk.Scale(bmf, from_=60, to=500, resolution=10, orient="horizontal",
+                         variable=minms, showvalue=False, length=150,
+                         command=lambda v: mslbl.config(text=f"{int(float(v))} ms"),
+                         bg=COL_BG, fg=COL_FG, troughcolor=COL_SURFACE,
+                         highlightthickness=0, bd=0, sliderrelief="flat",
+                         activebackground=COL_OK, width=14).pack(side="left")
+                mslbl.pack(side="left", padx=(6, 10))
+                bstat = tk.Label(bmf, text="", font=self.f_tiny, bg=COL_BG,
+                                 fg=COL_MUTED)
+
+                def _recompute():
+                    val = int(minms.get())
+                    bstat.config(text="berechne …")
+                    save_config({**load_config(), "bass_min_ms": val})
+
+                    def _work():
+                        try:
+                            new = core.bass_to_midi_notes(
+                                stems_dict.get("bass"), sr, min_note_ms=float(val))
+                        except Exception as ex:
+                            self.root.after(0, lambda: bstat.config(
+                                text=f"Fehler: {ex}"))
+                            return
+
+                        def _apply():
+                            if midi_player["obj"] is not None:
+                                midi_player["obj"].set_notes(new)
+                            if bstat.winfo_exists():
+                                bstat.config(text=f"{len(new)} Noten")
+                        self.root.after(0, _apply)
+                    threading.Thread(target=_work, daemon=True).start()
+
+                self._small_button(bmf, "Anwenden", _recompute).pack(
+                    side="left", padx=(0, 8))
+                bstat.pack(side="left")
             except Exception as e:
                 midi_player["obj"] = None
                 tk.Label(ctl, text=f"Bass-MIDI aus: {e}", font=self.f_tiny,
@@ -2004,7 +2050,9 @@ class DisplayApp:
                 if bass is None:
                     self._stem_log(log, "Kein Bass-Stem erhalten – übersprungen.")
                 else:
-                    out["bass_notes"] = core.bass_to_midi_notes(bass, ssr, log=cb)
+                    min_ms = float(load_config().get("bass_min_ms", 130))
+                    out["bass_notes"] = core.bass_to_midi_notes(
+                        bass, ssr, min_note_ms=min_ms, log=cb)
             # Stem-Player oeffnen, wenn Abspielen ODER Bass-MIDI gewaehlt ist
             # (Bass-MIDI laeuft synchron zur Stem-Position mit).
             if actions["play"] or actions.get("bassmidi"):

@@ -114,7 +114,10 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   **„♪ Bass-MIDI: an/aus"-Schalter** (Start/Stopp der MIDI-Ausgabe): die Noten
   werden **synchron zur Wiedergabe** über den in den Einstellungen gewählten
   **MIDI-Ausgang** gesendet – pausiert man die Stems, schweigt auch das MIDI, ein
-  Sprung in der Position synchronisiert sauber neu. Braucht `basic-pitch` **und**
+  Sprung in der Position synchronisiert sauber neu. Über den Regler **„Bass-MIDI
+  Mindestnote (ms)"** lässt sich die **Dichte** der Noten live anpassen (höher =
+  weniger, längere Noten); „Anwenden" rechnet auf dem bereits getrennten
+  Bass-Stem neu (keine erneute KI-Trennung) und der Wert wird gemerkt. Braucht `basic-pitch` **und**
   einen eingestellten MIDI-Ausgang; auf Windows/Python 3.12 ohne TensorFlow
   installieren (siehe `requirements.txt`: `--no-deps` + `onnxruntime`). Drums
   werden bewusst **nicht** nach MIDI gewandelt (tonlos).

@@ -3904,6 +3904,14 @@ class MidiNotePlayer:
         self._stop = threading.Event()
         self._thread = None
         self._active = {}                      # pitch -> end_s der klingenden Note
+        self._resync = False                   # nach Notentausch einmal neu aufsetzen
+
+    def set_notes(self, notes):
+        """Notenliste im laufenden Scheduler austauschen (z. B. nach Neuberechnung
+        mit anderer Mindest-Notenlaenge). Beim naechsten Tick wird sauber neu
+        synchronisiert (klingende Noten gehen kurz aus, dann passend wieder an)."""
+        self.notes = sorted(notes, key=lambda n: n[0])
+        self._resync = True
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -3937,6 +3945,9 @@ class MidiNotePlayer:
                     self._all_off()
                 time.sleep(0.02)
                 continue
+            if self._resync:                   # Noten wurden ausgetauscht
+                self._resync = False
+                self._all_off()
             desired = {}                       # pitch -> (end, velocity)
             for s, e, p, v in self.notes:
                 if s > t:
