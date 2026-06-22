@@ -438,6 +438,10 @@ class DisplayApp:
         self.lb_in.grid(row=1, column=0, sticky="nsew")
         self.lb_midi = tk.Listbox(body, **kw)
         self.lb_midi.grid(row=1, column=1, sticky="nsew", padx=(16, 0))
+        # Direkt unter der Liste: gewaehlten MIDI-Ausgang testen (hoerbare Sequenz).
+        self._small_button(body, "▶ MIDI-Ausgang testen",
+                           self._test_midi_output).grid(
+            row=2, column=1, sticky="w", padx=(16, 0), pady=(4, 0))
         if sys.platform == 'darwin':
             # macOS hat kein Loopback -- der uebliche Weg ist BlackHole.
             tk.Label(body, text="Wiedergabe mithoeren: BlackHole installieren"
@@ -639,6 +643,43 @@ class DisplayApp:
         self.ent_min.insert(0, f"{self.opt_min_bpm:.0f}")
         self.ent_max.delete(0, "end")
         self.ent_max.insert(0, f"{self.opt_max_bpm:.0f}")
+
+    def _selected_midi_name(self):
+        """Aktuell in der Liste gewaehlter MIDI-Ausgang (None = 'Kein MIDI')."""
+        try:
+            sel = self.lb_midi.curselection()
+            idx = sel[0] if sel else 0
+        except Exception:
+            idx = 0
+        names = getattr(self, "midi_names", [])
+        if idx <= 0 or not (0 <= idx - 1 < len(names)):
+            return None
+        return names[idx - 1]
+
+    def _test_midi_output(self):
+        """Sendet eine Testsequenz (Start + 1 Takt Clock + Dreiklang + Stop) an den
+        aktuell gewaehlten MIDI-Ausgang und meldet das Ergebnis -- so laesst sich
+        pruefen, ob der Ausgang den angeschlossenen Klangerzeuger erreicht."""
+        name = self._selected_midi_name()
+        if not name:
+            self.err_label.config(text="Kein MIDI-Ausgang gewählt (Liste links).",
+                                  fg=COL_WARN)
+            return
+        self.err_label.config(
+            text=f"MIDI-Test läuft … ({core.midi_output_desc(name)})", fg=COL_MUTED)
+
+        def _work():
+            try:
+                n = core.midi_test(name)
+            except Exception as e:
+                self.root.after(0, lambda e=e: self.err_label.config(
+                    text=f"MIDI-Test fehlgeschlagen: {e}", fg=COL_WARN))
+                return
+            self.root.after(0, lambda: self.err_label.config(
+                text=f"✓ {n} MIDI-Nachrichten an {core.midi_output_desc(name)} "
+                     "gesendet – Dreiklang C-E-G-C am Klangerzeuger hörbar?",
+                fg=COL_OK))
+        threading.Thread(target=_work, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Bildschirm-Wechsel
@@ -1204,6 +1245,7 @@ class DisplayApp:
                     mp.set_track(nm, midi_notes[nm], channel=ch - 1,
                                  enabled=(nm == "bass"))   # Bass standardmaessig an
                 mp.start()
+                mp.set_clock(False, bpm)       # Tempo merken, Clock zunaechst aus
 
                 midf = tk.LabelFrame(win, text="Stems → MIDI (Basic Pitch)",
                                      font=self.f_tiny, bg=COL_BG, fg=COL_ACCENT,
@@ -1223,8 +1265,29 @@ class DisplayApp:
                         mp.start()
                         masterbtn.config(text="♪ MIDI-Ausgabe: an", fg=COL_OK)
                 masterbtn.config(command=_toggle_master)
-                masterbtn.grid(row=0, column=0, columnspan=3, sticky="w",
-                               padx=6, pady=(4, 4))
+                masterbtn.grid(row=0, column=0, sticky="w", padx=6, pady=(4, 4))
+                sentlbl = tk.Label(midf, text="gesendet: 0", font=self.f_tiny,
+                                   bg=COL_BG, fg=COL_MUTED)
+                sentlbl.grid(row=0, column=1, columnspan=2, sticky="e", padx=6)
+                midi_player["sentlbl"] = sentlbl
+
+                # MIDI-Clock mitsenden (24 PPQN, Start bei ▶) -- so kann ein
+                # externer Recorder die Noten taktgenau mitschneiden.
+                clkvar = tk.BooleanVar(value=False)
+                win._a2m_clkvar = clkvar
+                clk_txt = ("MIDI-Clock mitsenden (Start bei ▶)" if bpm > 0
+                           else "MIDI-Clock – Tempo unbekannt")
+                clk_cb = tk.Checkbutton(
+                    midf, text=clk_txt, variable=clkvar,
+                    command=lambda: mp.set_clock(bool(clkvar.get()), bpm),
+                    font=self.f_small, bg=COL_BG,
+                    fg=COL_FG if bpm > 0 else COL_MUTED, selectcolor=COL_SURFACE,
+                    activebackground=COL_BG, activeforeground=COL_FG, bd=0,
+                    highlightthickness=0, anchor="w")
+                if bpm <= 0:
+                    clk_cb.config(state="disabled")
+                clk_cb.grid(row=1, column=0, columnspan=3, sticky="w", padx=6,
+                            pady=(0, 2))
 
                 def _mk_enable(name, var):
                     return lambda: mp.set_enabled(name, bool(var.get()))
@@ -1236,7 +1299,7 @@ class DisplayApp:
                     return _f
 
                 midi_vars = {}
-                for r, nm in enumerate(order, start=1):
+                for r, nm in enumerate(order, start=2):
                     onv = tk.BooleanVar(value=(nm == "bass"))
                     chv = tk.IntVar(value=int(cfg.get("midi_ch_" + nm,
                                                       def_ch.get(nm, r))))
@@ -1259,7 +1322,7 @@ class DisplayApp:
                     om.grid(row=r, column=2, sticky="w")
                 win._a2m_midi_vars = midi_vars   # Tk-Variablen vor GC schuetzen
 
-                crow = len(order) + 1
+                crow = len(order) + 2
                 minms = tk.IntVar(value=int(cfg.get("bass_min_ms", 130)))
                 win._a2m_minms = minms
                 mslbl = tk.Label(midf, text=f"Mindestnote {minms.get()} ms",
@@ -1339,6 +1402,10 @@ class DisplayApp:
             pos, total = player.position()
             poslbl.config(text=f"{self._fmt_pos(pos)} / {self._fmt_pos(total)}")
             playbtn.config(text="⏸" if player.is_playing() else "▶")
+            sl = midi_player.get("sentlbl")
+            if sl is not None and midi_player["obj"] is not None:
+                act = "an" if midi_player["obj"].is_active() else "aus"
+                sl.config(text=f"gesendet: {midi_player['obj'].sent} ({act})")
             win.after(200, _upd)
 
         def _close():
@@ -1423,6 +1490,9 @@ class DisplayApp:
         poslbl = tk.Label(trb, text="0:00 / 0:00", font=self.f_small, bg=COL_BG,
                           fg=COL_MUTED)
         poslbl.pack(side="left", padx=10)
+        sentlbl = tk.Label(trb, text="gesendet: 0", font=self.f_tiny, bg=COL_BG,
+                           fg=COL_MUTED)
+        sentlbl.pack(side="left", padx=(0, 4))
 
         midf = tk.Frame(win, bg=COL_BG)
         midf.pack(padx=20, pady=4, fill="x")
@@ -1462,6 +1532,7 @@ class DisplayApp:
             pos, total = transport.position()
             poslbl.config(text=f"{self._fmt_pos(pos)} / {self._fmt_pos(total)}")
             playbtn.config(text="⏸" if transport.is_playing() else "▶")
+            sentlbl.config(text=f"gesendet: {mp.sent}")
             win.after(150, _upd)
 
         def _close():
@@ -2312,6 +2383,18 @@ class DisplayApp:
             # (die MIDI-Spuren laufen synchron zur Stem-Position mit).
             if actions["play"] or actions.get("stemmidi"):
                 out["stems"], out["stem_sr"] = stems, ssr
+                # Tempo fuer eine optionale MIDI-Clock (falls nicht schon vom Sheet)
+                bpm = float((out.get("sheet") or {}).get("bpm", 0.0))
+                if bpm <= 0:
+                    try:
+                        src = stems.get("drums")
+                        if src is None:
+                            src = core.accompaniment_from_stems(stems)
+                        src = src.mean(axis=1) if getattr(src, "ndim", 1) == 2 else src
+                        bpm = float(core.estimate_tempo(src, ssr) or 0.0)
+                    except Exception:
+                        bpm = 0.0
+                out["bpm"] = bpm
             self._material_res = (out, None)
         except Exception as e:
             self._stem_log_error(log)
@@ -2754,7 +2837,7 @@ class DisplayApp:
                 # Stem-Player zuerst -> seine Position kann das Sheet mitlaufen lassen
                 player = None
                 if out.get("stems"):
-                    mbpm = (out.get("sheet") or {}).get("bpm", 0.0)
+                    mbpm = out.get("bpm") or (out.get("sheet") or {}).get("bpm", 0.0)
                     player = self._open_stem_player(out["stems"], out["stem_sr"],
                                                     midi_notes=out.get("midi_notes"),
                                                     bpm=mbpm)

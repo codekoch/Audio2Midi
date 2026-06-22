@@ -4092,6 +4092,21 @@ class MultiStemMidiPlayer:
         self._active = {}       # name -> {pitch: (end_s, channel)}
         self._stop = threading.Event()
         self._thread = None
+        self.sent = 0           # Zaehler gesendeter MIDI-Nachrichten (Live-Monitor)
+        # Optionale MIDI-Clock (24 PPQN), die der Wiedergabeposition folgt: beim
+        # Uebergang Stop->Play wird 'start' (Pos ~0) bzw. 'continue' gesendet, dann
+        # 24 Clock-Pulse pro Beat, bei Play->Stop 'stop'. So kann ein externer
+        # Recorder die gesendeten Noten taktgenau mitschneiden.
+        self.clock_on = False
+        self.bpm = 0.0
+        self._clk_running = False   # laeuft die Clock gerade (start gesendet)?
+        self._clk_idx = 0           # naechster zu sendender Clock-Tick (Index)
+
+    def set_clock(self, on, bpm=None):
+        with self.lock:
+            if bpm is not None:
+                self.bpm = float(bpm)
+            self.clock_on = bool(on) and self.bpm > 0
 
     def set_track(self, name, notes, channel=0, enabled=False):
         with self.lock:
@@ -4134,22 +4149,61 @@ class MultiStemMidiPlayer:
         try:
             self.out.send(mido.Message(kind, channel=int(ch) % 16,
                                        note=int(pitch), velocity=int(vel)))
+            self.sent += 1
         except Exception:
             pass
 
-    def _all_off(self):
+    def _send_raw(self, kind):                 # System-Realtime (clock/start/stop)
+        try:
+            self.out.send(mido.Message(kind))
+            self.sent += 1
+        except Exception:
+            pass
+
+    def _clock_tick(self, playing, pos):
+        """MIDI-Clock der Wiedergabeposition nachfuehren (im selben Thread wie die
+        Noten -> ein Sender, keine Nebenlaeufigkeit)."""
+        if not playing or not self.clock_on or self.bpm <= 0:
+            if self._clk_running:              # Stop/Pause/Clock-aus -> 'stop'
+                self._send_raw('stop')
+                self._clk_running = False
+            return
+        spt = 60.0 / (self.bpm * 24.0)         # Sekunden je Clock-Tick
+        if not self._clk_running:              # Transport-Start
+            if pos < 0.2:
+                self._send_raw('start')
+                self._clk_idx = 0
+            else:
+                self._send_raw('continue')
+                self._clk_idx = int(pos / spt) + 1
+            self._clk_running = True
+        target = int(pos / spt) + 1
+        if target - self._clk_idx > 50:        # Seek/Aussetzer -> einrasten statt Burst
+            self._clk_idx = target
+        while self._clk_idx < target:
+            self._send_raw('clock')
+            self._clk_idx += 1
+
+    def _notes_all_off(self):
         for act in self._active.values():
             for pitch, (end, ch) in list(act.items()):
                 self._send('note_off', ch, pitch, 0)
         self._active = {}
 
+    def _all_off(self):
+        self._notes_all_off()
+        if self._clk_running:                  # auch die Clock sauber stoppen
+            self._send_raw('stop')
+            self._clk_running = False
+
     def _run(self):
         while not self._stop.is_set():
             t = float(self.position_fn())
             playing = self.is_playing_fn() if self.is_playing_fn else True
+            self._clock_tick(playing, t)       # MIDI-Clock immer nachfuehren
             if not playing:
                 if any(self._active.values()):
-                    self._all_off()
+                    self._notes_all_off()
                 time.sleep(0.02)
                 continue
             with self.lock:                    # Schnappschuss (kurz gesperrt)
@@ -5181,6 +5235,39 @@ def open_midi_output(midi_name):
     if midi_name == VIRTUAL_MIDI:
         return mido.open_output(VIRTUAL_MIDI_NAME, virtual=True)
     return mido.open_output(midi_name)
+
+
+def midi_test(midi_name, channel=NOTE_CHANNEL, log=None):
+    """Sendet eine kurze, gut hoerbare Testsequenz an den gewaehlten MIDI-Ausgang
+    -- zum Pruefen, ob er den angeschlossenen Klangerzeuger wirklich erreicht:
+    MIDI-Start, 1 Takt Clock (24 Pulse), ein aufsteigender Dreiklang (C-E-G-C) und
+    MIDI-Stop. Oeffnet/schliesst den Port selbst. Rueckgabe: Anzahl gesendeter
+    Nachrichten. Wirft, wenn der Port nicht geoeffnet werden kann."""
+    out = open_midi_output(midi_name)
+    if out is None:
+        raise RuntimeError("Kein MIDI-Ausgang gewaehlt.")
+    n = 0
+    try:
+        out.send(mido.Message('start')); n += 1
+        for _ in range(24):                    # ~1 Takt bei 120 BPM
+            out.send(mido.Message('clock')); n += 1
+            time.sleep(0.5 / 24)
+        for note in (60, 64, 67, 72):          # C-Dur-Dreiklang aufsteigend
+            out.send(mido.Message('note_on', channel=int(channel),
+                                  note=note, velocity=100)); n += 1
+            time.sleep(0.18)
+            out.send(mido.Message('note_off', channel=int(channel),
+                                  note=note, velocity=0)); n += 1
+            time.sleep(0.04)
+        out.send(mido.Message('stop')); n += 1
+    finally:
+        try:
+            out.close()
+        except Exception:
+            pass
+    _emit(log, f"MIDI-Test: {n} Nachrichten an '{midi_output_desc(midi_name)}' "
+               "gesendet.")
+    return n
 
 
 def midi_output_desc(midi_name):

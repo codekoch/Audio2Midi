@@ -38,6 +38,12 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   gegen Mess-Zittern, sanftes Aufholen statt Tick-Bursts. Optional
   **beat-synchron**: Tick 1 von 24 rastet auf die erkannte Zählzeit ein
   (sanfte Phasenregelung, gemessen ~1–2 ms Streuung).
+- **MIDI-Ausgang prüfen** – im Einstellungsbildschirm sendet **„MIDI testen"** eine
+  kurze, hörbare Testsequenz (MIDI-Start + 1 Takt Clock + Dreiklang C-E-G-C + Stop)
+  an den gewählten Ausgang und meldet, wie viele Nachrichten rausgingen – so lässt
+  sich verifizieren, ob der Ausgang den Klangerzeuger wirklich erreicht. In den
+  MIDI-Fenstern (Stems→MIDI, MIDI-Datei) zeigt zudem ein **Live-Zähler „gesendet: N"**,
+  dass während des Abspielens tatsächlich Daten fließen.
 - **Noten-Modus (Pitch → MIDI)** (optional) – statt der Tempo-Analyse werden
   erkannte Tonhöhen direkt als MIDI gesendet: **monophon** (YIN, geringe Latenz,
   mit Halte-Hysterese gegen Neutrigger beim Ausklingen), **polyphon** (FFT-Peaks
@@ -124,7 +130,10 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
   rechnet auf den schon getrennten Stems neu, ohne erneute KI-Trennung). Die Noten
   laufen **synchron zur Wiedergabe** über den in den Einstellungen gewählten
   **MIDI-Ausgang** – pausiert man die Stems, schweigt auch das MIDI, ein Positions-
-  sprung synchronisiert sauber neu. Mit **„MIDI speichern…"** lässt sich eine
+  sprung synchronisiert sauber neu. Optional lässt sich eine **MIDI-Clock mitsenden**
+  (24 PPQN, folgt dem Tempo): beim Start wird ein **MIDI-`start`** gesendet (bzw.
+  `continue` mitten im Stück) und am Ende `stop` – so kann ein angeschlossener
+  Sequenzer/DAW die gesendeten Noten **taktgenau mitschneiden**. Mit **„MIDI speichern…"** lässt sich eine
   **mehrspurige MIDI-Datei** aller aktuell aktiven Spuren (je eigener Kanal)
   exportieren, um später daran weiterzuarbeiten. Braucht `basic-pitch` **und** einen
   eingestellten MIDI-Ausgang; auf Windows/Python 3.12 ohne TensorFlow installieren
