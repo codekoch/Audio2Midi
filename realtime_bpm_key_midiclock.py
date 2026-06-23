@@ -3991,8 +3991,18 @@ def stem_to_midi_notes(audio, sr, min_freq=40.0, max_freq=2000.0,
     erwartet eine Datei -> der Stem wird mono in eine temporaere WAV geschrieben.
     Nutzt automatisch das ONNX-Modell, wenn TensorFlow fehlt."""
     import tempfile
-    from basic_pitch.inference import predict
-    from basic_pitch import ICASSP_2022_MODEL_PATH
+    import logging
+    # basic-pitch meldet beim Import per logging.warning, dass CoreML/TFLite/
+    # TensorFlow fehlen (wir nutzen bewusst ONNX) -- diese harmlosen Hinweise
+    # sehen wie Fehler aus. Root-Level kurz anheben, damit sie nicht erscheinen.
+    _root = logging.getLogger()
+    _lvl = _root.level
+    _root.setLevel(logging.ERROR)
+    try:
+        from basic_pitch.inference import predict
+        from basic_pitch import ICASSP_2022_MODEL_PATH
+    finally:
+        _root.setLevel(_lvl)
     y = np.asarray(audio, dtype=np.float32)
     if y.ndim == 2:
         y = y.mean(axis=1)
@@ -5354,13 +5364,16 @@ def open_midi_output(midi_name):
     return mido.open_output(midi_name)
 
 
-def midi_test(midi_name, channel=NOTE_CHANNEL, log=None):
+def midi_test(midi_name, channel=NOTE_CHANNEL, log=None, port=None):
     """Sendet eine kurze, gut hoerbare Testsequenz an den gewaehlten MIDI-Ausgang
     -- zum Pruefen, ob er den angeschlossenen Klangerzeuger wirklich erreicht:
     MIDI-Start, 1 Takt Clock (24 Pulse), ein aufsteigender Dreiklang (C-E-G-C) und
-    MIDI-Stop. Oeffnet/schliesst den Port selbst. Rueckgabe: Anzahl gesendeter
-    Nachrichten. Wirft, wenn der Port nicht geoeffnet werden kann."""
-    out = open_midi_output(midi_name)
+    MIDI-Stop. Oeffnet/schliesst den Port selbst -- AUSSER ein bereits offener
+    'port' wird uebergeben (z. B. der gemeinsame Ausgang), dann wird dieser genutzt
+    und NICHT geschlossen. Rueckgabe: Anzahl gesendeter Nachrichten. Wirft, wenn der
+    Port nicht geoeffnet werden kann."""
+    own = port is None
+    out = port if port is not None else open_midi_output(midi_name)
     if out is None:
         raise RuntimeError("Kein MIDI-Ausgang gewaehlt.")
     n = 0
@@ -5378,10 +5391,11 @@ def midi_test(midi_name, channel=NOTE_CHANNEL, log=None):
             time.sleep(0.04)
         out.send(mido.Message('stop')); n += 1
     finally:
-        try:
-            out.close()
-        except Exception:
-            pass
+        if own:
+            try:
+                out.close()
+            except Exception:
+                pass
     _emit(log, f"MIDI-Test: {n} Nachrichten an '{midi_output_desc(midi_name)}' "
                "gesendet.")
     return n

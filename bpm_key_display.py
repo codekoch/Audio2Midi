@@ -39,6 +39,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 
 import numpy as np
@@ -46,7 +47,7 @@ import numpy as np
 try:
     import tkinter as tk
     import tkinter.font as tkfont
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog, messagebox, ttk
 except ImportError:
     sys.exit("Tkinter fehlt. Raspberry Pi OS: sudo apt install python3-tk")
 
@@ -208,6 +209,10 @@ class DisplayApp:
         self._dj_stems_res = None             # (idx, stems, sr, err) vom Trenn-Thread
         self._stem_players = []               # offene StemPlayer
         self._midi_players = []               # (MultiStemMidiPlayer, port) MIDI-Datei
+        # GEMEINSAMER MIDI-Ausgang: WinMM-Ports (z. B. "GS Wavetable Synth") sind
+        # single-client -> nur EINMAL oeffnen und per Referenzzaehler teilen.
+        self._midi_shared = {"name": None, "port": None, "refs": 0}
+        self._midi_lock = threading.Lock()
         self._material_res = None             # (out|None, err) vom Verarbeitungs-Thread
         self._material_clock = None           # Datei-Pfad: Clock NACH Verarbeitung
         self._load_options()                  # Optionen + BPM-Bereich anwenden
@@ -664,6 +669,52 @@ class DisplayApp:
             return None
         return names[idx - 1]
 
+    def _acquire_midi_out(self, name):
+        """Gemeinsamen MIDI-Ausgang holen: EINMAL geoeffnet, von allen Fenstern
+        genutzt (WinMM-Ports wie der GS Wavetable Synth sind single-client). Erhoeht
+        den Referenzzaehler; mit _release_midi_out(port) wieder freigeben. Wirft,
+        wenn kein Ausgang gewaehlt ist oder das Oeffnen scheitert."""
+        if not name:
+            raise RuntimeError("kein MIDI-Ausgang eingestellt")
+        with self._midi_lock:
+            sh = self._midi_shared
+            if sh["port"] is not None and sh["name"] == name:
+                sh["refs"] += 1
+                return sh["port"]
+            if sh["port"] is None:
+                port = core.open_midi_output(name)
+                if port is None:
+                    raise RuntimeError("kein MIDI-Ausgang eingestellt")
+                sh["name"], sh["port"], sh["refs"] = name, port, 1
+                return port
+        # Ein ANDERER Port ist bereits geteilt offen -> separaten (eigenen) oeffnen
+        port = core.open_midi_output(name)
+        if port is None:
+            raise RuntimeError("kein MIDI-Ausgang eingestellt")
+        return port
+
+    def _release_midi_out(self, port):
+        """Eine Referenz auf den (gemeinsamen) MIDI-Ausgang freigeben; beim letzten
+        Nutzer wird der Port geschlossen. Separat geoeffnete Ports werden direkt
+        geschlossen."""
+        if port is None:
+            return
+        with self._midi_lock:
+            sh = self._midi_shared
+            if port is sh["port"]:
+                sh["refs"] -= 1
+                if sh["refs"] <= 0:
+                    try:
+                        sh["port"].close()
+                    except Exception:
+                        pass
+                    sh["name"], sh["port"], sh["refs"] = None, None, 0
+                return
+        try:                                   # nicht der geteilte Port -> direkt zu
+            port.close()
+        except Exception:
+            pass
+
     def _test_midi_output(self):
         """Sendet eine Testsequenz (Start + 1 Takt Clock + Dreiklang + Stop) an den
         aktuell gewaehlten MIDI-Ausgang und meldet das Ergebnis -- so laesst sich
@@ -677,12 +728,16 @@ class DisplayApp:
             text=f"MIDI-Test läuft … ({core.midi_output_desc(name)})", fg=COL_MUTED)
 
         def _work():
+            port = None
             try:
-                n = core.midi_test(name)
+                port = self._acquire_midi_out(name)   # geteilter Port (kein Konflikt)
+                n = core.midi_test(name, port=port)
             except Exception as e:
                 self.root.after(0, lambda e=e: self.err_label.config(
                     text=f"MIDI-Test fehlgeschlagen: {e}", fg=COL_WARN))
                 return
+            finally:
+                self._release_midi_out(port)
             self.root.after(0, lambda: self.err_label.config(
                 text=f"✓ {n} MIDI-Nachrichten an {core.midi_output_desc(name)} "
                      "gesendet – Dreiklang C-E-G-C am Klangerzeuger hörbar?",
@@ -889,7 +944,7 @@ class DisplayApp:
         if midi_name and (midi_name == core.VIRTUAL_MIDI
                           or midi_name in mido.get_output_names()):
             try:
-                self.file_midi = core.open_midi_output(midi_name)
+                self.file_midi = self._acquire_midi_out(midi_name)
             except Exception:
                 self.file_midi = None
         try:
@@ -898,7 +953,7 @@ class DisplayApp:
         except Exception as e:
             if self.file_midi is not None:
                 try:
-                    self.file_midi.close()
+                    self._release_midi_out(self.file_midi)
                 except Exception:
                     pass
                 self.file_midi = None
@@ -930,10 +985,7 @@ class DisplayApp:
                 pass
             self.file_player = None
         if self.file_midi is not None:
-            try:
-                self.file_midi.close()
-            except Exception:
-                pass
+            self._release_midi_out(self.file_midi)
             self.file_midi = None
         self._file_playing = False
         try:
@@ -1110,7 +1162,12 @@ class DisplayApp:
                  fg=COL_FG).pack(pady=(12, 2))
         tk.Label(win, text="Fortschritt & Meldungen – die KI laeuft lokal "
                  "(kann einige Minuten dauern).", font=self.f_tiny, bg=COL_BG,
-                 fg=COL_MUTED).pack(pady=(0, 8))
+                 fg=COL_MUTED).pack(pady=(0, 6))
+        stat = tk.Label(win, text="Starte …", font=self.f_small, bg=COL_BG,
+                        fg=COL_FG)
+        stat.pack(pady=(0, 2))
+        bar = ttk.Progressbar(win, length=620, mode="determinate", maximum=100)
+        bar.pack(padx=16, pady=(0, 8))
         frame = tk.Frame(win, bg=COL_BG)
         frame.pack(fill="both", expand=True, padx=14, pady=4)
         sb = tk.Scrollbar(frame)
@@ -1122,7 +1179,12 @@ class DisplayApp:
         sb.config(command=txt.yview)
         txt.config(state="disabled")
         self._small_button(win, "Schließen", win.destroy).pack(pady=8)
-        log = {"win": win, "txt": txt, "q": queue.Queue()}
+        log = {"win": win, "txt": txt, "q": queue.Queue(),
+               "bar": bar, "stat": stat, "t_start": time.time(), "prog": None}
+
+        def _fmt(sec):
+            sec = max(0, int(sec))
+            return f"{sec // 60}:{sec % 60:02d}"
 
         def _poll():
             if not win.winfo_exists():
@@ -1140,6 +1202,21 @@ class DisplayApp:
             if got:
                 txt.see("end")
                 txt.config(state="disabled")
+            # Fortschrittsbalken: rastet pro fertiger Phase ein, kriecht innerhalb
+            # einer Phase sanft weiter (kein erfundener Prozentwert).
+            prog = log.get("prog")
+            if prog:
+                el = time.time() - log["t_start"]
+                k, tot, name = prog["step"], prog["total"], prog["name"]
+                if k >= tot:
+                    bar["value"] = 100
+                    stat.config(text=f"Fertig · Gesamtdauer {_fmt(el)}")
+                else:
+                    tau = 25.0 if name in ("Stems trennen", "Song-Sheet") else 12.0
+                    fp = 1.0 - math.exp(-max(0.0, time.time() - prog["tp"]) / tau)
+                    bar["value"] = (k + min(0.92, fp)) / tot * 100.0
+                    stat.config(text=f"Schritt {k + 1}/{tot}: {name} · "
+                                     f"laeuft seit {_fmt(el)}")
             win.after(150, _poll)
 
         _poll()
@@ -1153,6 +1230,15 @@ class DisplayApp:
             log["q"].put(str(line))
         except Exception:
             pass
+
+    def _stem_progress(self, log, step, total, name):
+        """Thread-sicher den aktuellen Verarbeitungsschritt melden (treibt den
+        Fortschrittsbalken). step = Anzahl bereits FERTIGER Phasen, total = gesamt;
+        step >= total bedeutet fertig."""
+        if not log:
+            return
+        log["prog"] = {"step": int(step), "total": max(1, int(total)),
+                       "name": str(name), "tp": time.time()}
 
     def _stem_log_error(self, log):
         """Vollen Traceback ins Log-Fenster schreiben (im Fehlerfall)."""
@@ -1239,9 +1325,7 @@ class DisplayApp:
         if midi_notes:
             cfg = load_config()
             try:
-                port = core.open_midi_output(cfg.get("midi_output") or None)
-                if port is None:
-                    raise RuntimeError("kein MIDI-Ausgang eingestellt")
+                port = self._acquire_midi_out(cfg.get("midi_output") or None)
                 mp = core.MultiStemMidiPlayer(
                     port, position_fn=lambda: player.position()[0],
                     is_playing_fn=player.is_playing)
@@ -1425,8 +1509,16 @@ class DisplayApp:
                     row=brow, column=1, columnspan=2, sticky="w", pady=(2, 6))
             except Exception as e:
                 midi_player["obj"] = None
-                tk.Label(win, text=f"MIDI aus: {e}", font=self.f_tiny,
-                         bg=COL_BG, fg=COL_MUTED).pack(pady=(0, 6))
+                msg = str(e)
+                if "openPort" in msg or "creating Windows MM" in msg:
+                    msg = ("MIDI-Port belegt – der GS Wavetable Synth erlaubt nur "
+                           "EINEN Zugriff gleichzeitig. Bitte ein noch offenes "
+                           "MIDI-/Stems-Fenster oder eine zweite Programm-Instanz "
+                           "schließen – oder einen loopMIDI-Port wählen (mehrfach "
+                           "nutzbar). Audio läuft trotzdem.")
+                tk.Label(win, text=f"⚠ MIDI aus: {msg}", font=self.f_tiny,
+                         bg=COL_BG, fg=COL_WARN, wraplength=560,
+                         justify="left").pack(pady=(0, 6))
 
         def _upd():
             if not win.winfo_exists():
@@ -1447,10 +1539,7 @@ class DisplayApp:
                 except Exception:
                     pass
             if midi_player["port"] is not None:
-                try:
-                    midi_player["port"].close()
-                except Exception:
-                    pass
+                self._release_midi_out(midi_player["port"])
             try:
                 player.stop()
             except Exception:
@@ -1602,9 +1691,7 @@ class DisplayApp:
             return
         cfg = load_config()
         try:
-            port = core.open_midi_output(cfg.get("midi_output") or None)
-            if port is None:
-                raise RuntimeError("kein MIDI-Ausgang eingestellt")
+            port = self._acquire_midi_out(cfg.get("midi_output") or None)
         except Exception as e:
             messagebox.showerror(
                 "MIDI laden", f"Kein MIDI-Ausgang verfügbar:\n{e}\n\n"
@@ -1696,10 +1783,7 @@ class DisplayApp:
                 mp.stop()
             except Exception:
                 pass
-            try:
-                port.close()
-            except Exception:
-                pass
+            self._release_midi_out(port)
             if (mp, port) in self._midi_players:
                 self._midi_players.remove((mp, port))
             win.destroy()
@@ -1819,7 +1903,7 @@ class DisplayApp:
         if midi_name and (midi_name == core.VIRTUAL_MIDI
                           or midi_name in mido.get_output_names()):
             try:
-                self.dj_midi = core.open_midi_output(midi_name)
+                self.dj_midi = self._acquire_midi_out(midi_name)
             except Exception:
                 self.dj_midi = None
         self.dj_clock_stop = threading.Event()
@@ -2244,10 +2328,7 @@ class DisplayApp:
                 pass
             self.dj_engine = None
         if self.dj_midi is not None:
-            try:
-                self.dj_midi.close()
-            except Exception:
-                pass
+            self._release_midi_out(self.dj_midi)
             self.dj_midi = None
         if self.dj_win is not None:
             try:
@@ -2528,6 +2609,11 @@ class DisplayApp:
                    "stems": None, "stem_sr": None, "export_paths": None,
                    "midi_notes": None}
             ov = float(actions.get("overlap", 0.1))
+            # Phasen fuer den Fortschrittsbalken zaehlen (Trennen ist immer dabei)
+            total = (1 + int(bool(actions["export"])) + int(bool(actions["sheet"]))
+                     + int(bool(actions.get("stemmidi"))))
+            step = 0
+            self._stem_progress(log, step, total, "Stems trennen")
             self._stem_log(log, "== Stems trennen (einmalig) == "
                            + ("[hohe Qualität]" if ov >= 0.2 else "[schnell]"))
             if isinstance(source, tuple):            # ('array', rec, sr)
@@ -2535,11 +2621,15 @@ class DisplayApp:
                 stems, ssr = core.separate_stems_array(rec, srr, log=cb, overlap=ov)
             else:
                 stems, ssr = core.separate_stems(source, log=cb, overlap=ov)
+            step += 1                              # Trennung fertig
             if actions["export"]:
+                self._stem_progress(log, step, total, "Stems exportieren")
                 self._stem_log(log, "== Stems exportieren ==")
                 out["export_paths"] = core.write_stems_to_files(
                     stems, ssr, actions["out_dir"], base=title, log=cb)
+                step += 1
             if actions["sheet"]:
+                self._stem_progress(log, step, total, "Song-Sheet")
                 self._stem_log(log, "== Song-Sheet erstellen ==")
                 out["sheet"] = core.song_sheet_from_stems(
                     stems, ssr, title=title, whisper_size=actions["model"],
@@ -2557,7 +2647,9 @@ class DisplayApp:
                             mix = mix[:m] + a[:m]
                     out["sheet"]["mix"] = mix
                     out["sheet"]["sr"] = ssr
+                step += 1
             if actions.get("stemmidi"):
+                self._stem_progress(log, step, total, "Stems → MIDI")
                 self._stem_log(log, "== Stems → MIDI (Basic Pitch) ==")
                 min_ms = float(load_config().get("bass_min_ms", 130))
                 out["midi_notes"] = core.stems_to_midi_notes(
@@ -2588,6 +2680,7 @@ class DisplayApp:
                     except Exception:
                         bpm = 0.0
                 out["bpm"] = bpm
+            self._stem_progress(log, total, total, "Fertig")
             self._material_res = (out, None)
         except Exception as e:
             self._stem_log_error(log)
@@ -2902,7 +2995,7 @@ class DisplayApp:
         self.midi_name = midi_name
         if midi_name:
             try:
-                self.midi_out = core.open_midi_output(midi_name)
+                self.midi_out = self._acquire_midi_out(midi_name)
             except Exception as e:
                 core.stop_capture(self.stream, self.cap_thread, self.cap_stop)
                 self.stream = self.cap_thread = self.cap_stop = None
@@ -2971,10 +3064,7 @@ class DisplayApp:
             self.note_thread.join(timeout=1.5)
             self.note_thread = self.note_stop = None
         if self.midi_out is not None:
-            try:
-                self.midi_out.close()
-            except Exception:
-                pass
+            self._release_midi_out(self.midi_out)
             self.midi_out = None
         core.drain_queue(self.audio_q)
         with self.shared.lock:
@@ -2999,10 +3089,7 @@ class DisplayApp:
                 mp.stop()
             except Exception:
                 pass
-            try:
-                port.close()
-            except Exception:
-                pass
+            self._release_midi_out(port)
         self._midi_players = []
         self.app_stop.set()
         if self.analysis_thread is not None:
