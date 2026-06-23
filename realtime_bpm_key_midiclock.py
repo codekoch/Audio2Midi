@@ -196,6 +196,10 @@ CHORD_TAIL_MAX        = 2.5     #   nie kuerzer als ~1 Beat Chroma-Substanz,
 CHORD_BASS_WEIGHT     = 0.4     # Bonus, wenn der Akkord-Grundton den Bass
                                 #   dominiert -- trennt Umkehrungen und ton-
                                 #   verwandte Deutungen (C-Dur vs. Am7)
+CHORD_FUNC_BIAS       = 0.10    # Funktions-Prior fuers Sheet: Hauptdreiklaenge
+                                #   I/IV/V (bzw. i/iv/V) leicht bevorzugen, die
+                                #   seltene iii (z. B. Em in C-Dur) benachteiligen
+                                #   -- bricht die G-vs-Em-/C-vs-Em-Verwechslung
 CHORD_STICKY          = 0.02    # kleiner Score-Bonus fuer den zuletzt
                                 #   erkannten Akkord (nur noch fuer die
                                 #   Einzelbild-Funktion classify_chord; der
@@ -1029,6 +1033,44 @@ def _diatonic_mask(key):
             k += 1
     _diatonic_masks[key] = mask
     return mask
+
+
+_func_bias_cache = {}
+
+
+def _function_bias(key, w):
+    """Funktions-Prior ueber CHORD_NAMES: leichter Bonus fuer die Hauptdreiklaenge
+    (Dur: I/IV/V, Moll: i/iv/V) und Abzug fuer die in Popmusik seltene iii (Em in
+    C-Dur) bzw. den verminderten Stufenakkord. Das bricht Verwechslungen zwischen
+    tonverwandten Dreiklaengen, die sich zwei Toene teilen (G vs. Em, C vs. Em),
+    ohne ii/vi (Dm/Am) anzutasten -- die sind in Pop ueblich. None bei unbekannter
+    Tonart. 'w' = Staerke (Score-Einheiten)."""
+    ck = (key, w)
+    cached = _func_bias_cache.get(ck)
+    if cached is not None:
+        return cached
+    try:
+        note, mode = key.rsplit(" ", 1)
+        root = NOTE_NAMES.index(note)
+    except (AttributeError, ValueError):
+        return None
+    if mode == "Dur":          # (Stufe in Halbtonschritten, Akkord-Suffix): Faktor
+        deg = {(0, ""): +1.0, (5, ""): +1.0, (7, ""): +1.0,    # I  IV  V
+               (4, "m"): -1.0, (11, "dim"): -1.0}              # iii  vii°
+    else:                      # Moll (natuerlich + Dur-Dominante)
+        deg = {(0, "m"): +1.0, (5, "m"): +1.0,                 # i  iv
+               (7, ""): +1.0, (7, "m"): +1.0,                  # V (Dur) / v
+               (2, "dim"): -1.0}                               # ii°
+    bias = np.zeros(len(CHORD_NAMES))
+    k = 0
+    for r in range(12):
+        for suffix, _ivs in CHORD_TYPES:
+            f = deg.get(((r - root) % 12, suffix))
+            if f:
+                bias[k] = w * f
+            k += 1
+    _func_bias_cache[ck] = bias
+    return bias
 
 
 class ChordTracker:
@@ -3062,6 +3104,75 @@ def write_stems_to_files(stems, sr, out_dir, base="stems", log=None):
     return written
 
 
+def bar_aligned_stems(stems, sr, lead_bars=2, beats_per_bar=4, log=None):
+    """Schneidet ALLE Stems gemeinsam so, dass der Sample-Start exakt 'lead_bars'
+    Takte VOR dem ersten Downbeat liegt (4/4-Annahme) -- ideal als getriggertes
+    Sample: ein Auftakt liegt im Vorlauf, die '1' sitzt genau auf Takt lead_bars+1.
+    Derselbe Schnitt wird auf JEDEN Stem angewandt (Sync bleibt). Liegt der
+    Schnittpunkt vor dem Songanfang, wird vorne mit Stille aufgefuellt; das ENDE
+    bleibt unveraendert. Rueckgabe: neues stems-dict (gleiche Keys, gleiche sr).
+    Faellt bei Problemen auf die unveraenderten Stems zurueck."""
+    import librosa
+    ref = stems.get("drums")                       # Drums sind die beste Beat-Referenz
+    if ref is None:
+        ref = accompaniment_from_stems(stems)
+    if ref is None:
+        return dict(stems)
+    y = np.asarray(ref, dtype=np.float32)
+    if y.ndim == 2:
+        y = y.mean(axis=1)
+    sr = int(sr)
+    # Tempo OKTAV-EINDEUTIG schaetzen: beat_track allein erwischt oft das doppelte
+    # Tempo -> halbe Taktlaenge. estimate_tempo faltet in [MIN_BPM, MAX_BPM].
+    try:
+        bpm = float(estimate_tempo(y, sr) or 0.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    except Exception as e:
+        _emit(log, f"Takt-Schnitt uebersprungen ({e}).")
+        return dict(stems)
+    hop = 512
+    fr = sr / float(hop)                            # Frames pro Sekunde
+    beat_dur = 60.0 / bpm if bpm > 0 else 0.0
+    n_beats = int(len(onset_env) / fr / beat_dur) if beat_dur > 0 else 0
+    if n_beats < beats_per_bar + 1:
+        _emit(log, "Takt-Schnitt uebersprungen (kein Tempo / zu kurz).")
+        return dict(stems)
+    # Beat-Raster am geschaetzten Tempo aufbauen und die Phase suchen, die die
+    # Onset-Energie maximiert (statt dem evtl. oktav-falschen beat_track zu folgen).
+    best_phi, best_e = 0.0, -1.0
+    for s in range(48):
+        phi = (s / 48.0) * beat_dur
+        idx = np.round((phi + np.arange(n_beats) * beat_dur) * fr).astype(int)
+        idx = idx[idx < len(onset_env)]
+        e = float(onset_env[idx].sum())
+        if e > best_e:
+            best_e, best_phi = e, phi
+    beat_times = best_phi + np.arange(n_beats) * beat_dur
+    bidx = np.clip(np.round(beat_times * fr).astype(int), 0, len(onset_env) - 1)
+    bs = onset_env[bidx]
+    # Downbeat-Phase = Viertel-Phase mit der groessten Onset-Staerke (Kick auf „1").
+    scores = [float(bs[ph::beats_per_bar].sum()) for ph in range(beats_per_bar)]
+    phase = int(np.argmax(scores))
+    t_db = float(beat_times[phase])                # erster Downbeat
+    bar_dur = beats_per_bar * beat_dur
+    cut = t_db - lead_bars * bar_dur               # Schnittpunkt (kann < 0 sein)
+    cut_n = int(round(cut * sr))
+    out = {}
+    for name, a in stems.items():
+        a = np.asarray(a, dtype=np.float32)
+        if cut_n >= 0:
+            out[name] = np.ascontiguousarray(a[cut_n:])
+        else:                                      # vor dem Songanfang -> Stille davor
+            pad = np.zeros((-cut_n,) + a.shape[1:], dtype=np.float32)
+            out[name] = np.ascontiguousarray(np.concatenate([pad, a], axis=0))
+    _emit(log, f"Takt-Schnitt: Downbeat ~{t_db:.2f}s, {bpm:.0f} BPM -> Start "
+               f"{cut:+.2f}s ({lead_bars} Takte Vorlauf"
+               + (", vorne mit Stille aufgefuellt)" if cut_n < 0 else ")") + ".")
+    return out
+
+
 def separate_stems_to_files(path, out_dir, model="htdemucs", base=None, log=None,
                             overlap=0.25):
     """Trennt eine Datei und speichert die Spuren als einzelne WAVs.
@@ -3490,7 +3601,8 @@ def _chord_emissions(y, sr, bass_audio=None, beat_times=None, win_beats=2,
 
 def chord_sequence(y, sr, key=None, bass_audio=None, beat_times=None,
                    win_beats=2, min_dur=1.2, triads_only=True, simple=True,
-                   key_bias=0.12, bass_weight=None, harmonic_sep=True, log=None):
+                   key_bias=0.12, bass_weight=None, harmonic_sep=True,
+                   func_bias=None, log=None):
     """Offline-Akkordfolge eines ganzen Stuecks (ueber die vorhandene Erkennung
     chroma_pcp + chord_scores). Fuer ein lesbares Sheet stabilisiert:
       * je 'win_beats' Beats EIN Akkord (Chroma ueber das Fenster gemittelt),
@@ -3547,6 +3659,8 @@ def chord_sequence(y, sr, key=None, bass_audio=None, beat_times=None,
     if bass_weight is None:
         bass_weight = 0.9 if bass_cg is not None else None
     diatonic = _diatonic_mask(key) if key else None
+    fbias = (_function_bias(key, CHORD_FUNC_BIAS if func_bias is None else func_bias)
+             if key else None)
     allowed = _TRIAD_MASK if triads_only else (_SHEET_MASK if simple else None)
     _emit(log, f"Bestimme Akkorde ({max(0, len(edges) - 1)} Fenster) …")
     raw, prev = [], None
@@ -3577,6 +3691,8 @@ def chord_sequence(y, sr, key=None, bass_audio=None, beat_times=None,
                             scores[k] += CHORD_STICKY
                     if diatonic is not None:
                         scores = scores + key_bias * diatonic
+                    if fbias is not None:
+                        scores = scores + fbias
                     if allowed is not None:
                         scores = np.where(allowed, scores, -1e9)
                     ch = CHORD_NAMES[int(np.argmax(scores))]
@@ -5399,6 +5515,21 @@ def midi_test(midi_name, channel=NOTE_CHANNEL, log=None, port=None):
     _emit(log, f"MIDI-Test: {n} Nachrichten an '{midi_output_desc(midi_name)}' "
                "gesendet.")
     return n
+
+
+def play_note(port, note, channel=9, velocity=110, dur=0.25):
+    """Sendet auf einem BEREITS offenen Port einen kurzen Einzelschlag (note_on,
+    kurz warten, note_off) -- z. B. zum Pruefen, ob eine Schlagzeug-Note das
+    richtige Geraet/Instrument triggert. Schliesst den Port NICHT."""
+    if port is None:
+        return
+    n, ch = int(note) % 128, int(channel) % 16
+    try:
+        port.send(mido.Message('note_on', channel=ch, note=n, velocity=int(velocity)))
+        time.sleep(max(0.0, float(dur)))
+        port.send(mido.Message('note_off', channel=ch, note=n, velocity=0))
+    except Exception:
+        pass
 
 
 def midi_output_desc(midi_name):

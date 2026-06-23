@@ -152,7 +152,14 @@ siehe [Webversion](#webversion-browser).
   **Automatisch** (Standard) trennt schnell, wenn nur ein Song-Sheet entsteht
   (Text/Akkorde sind robust gegen kleine Trennartefakte), und in **voller
   Qualität**, sobald die Stems als **Audio exportiert/abgespielt** oder zu **MIDI**
-  gewandelt werden; man kann auch fest „Hoch" oder „Schnell" erzwingen. In der Konsole exportiert `--stems DATEI [--out ORDNER]`
+  gewandelt werden; man kann auch fest „Hoch" oder „Schnell" erzwingen. Für die
+  **Sample-Nutzung** gibt es die Export-Option **„Stems auf Takt schneiden"**: dann
+  werden alle exportierten Stems **gemeinsam** so geschnitten, dass der Start
+  **exakt 2 Takte vor dem ersten Downbeat** liegt (4/4) – ein **Auftakt** liegt damit
+  im Vorlauf, die „1" sitzt genau auf Takt 3 (beginnt das Stück zu früh, wird vorne
+  mit Stille auf den Taktanfang aufgefüllt); das Ende bleibt unverändert. Das Tempo
+  wird oktav-eindeutig geschätzt, die Downbeat-Lage ist heuristisch – kurz
+  gegenprüfen. In der Konsole exportiert `--stems DATEI [--out ORDNER]`
   die Spuren als einzelne WAVs. Braucht das zusätzliche Paket **`demucs`**
   (`pip install demucs`, zieht PyTorch); ohne bleibt das Feature einfach aus. Die
   KI-Trennung läuft offline und kann je nach CPU einige Minuten je Stück dauern.
@@ -193,7 +200,9 @@ siehe [Webversion](#webversion-browser).
   breitbandigen Kick-Anschlag. Über den Knopf **„Schlagzeug…"** im Stem-Player öffnet
   sich ein **eigenes Fenster**: je Komponente **an/aus** und **frei wählbare
   MIDI-Note** (vorbelegt mit der **General-MIDI-Drum-Map**, Kick 36 / Snare 38 /
-  HiHat 42 …) plus ein **Empfindlichkeits-Regler**. Die Drums laufen als eigene Spur
+  HiHat 42 …), ein **▸ Test**-Knopf je Zeile, der die Note kurz auf dem Drum-Kanal
+  sendet (so prüfst du, ob sie das richtige Instrument am Gerät triggert), plus ein
+  **Empfindlichkeits-Regler**. Die Drums laufen als eigene Spur
   (Standard **Kanal 10**, GM-Schlagzeug) **synchron** mit, lassen sich an-/abschalten
   und gemeinsam mit den anderen Spuren in die **MIDI-Datei** exportieren. Braucht
   **keine** Zusatzbibliothek (nur `librosa`). Hinweis: Kick/Snare/HiHat sitzen gut;
@@ -204,7 +213,11 @@ siehe [Webversion](#webversion-browser).
   wird **spurweise** über den eingestellten MIDI-Ausgang abgespielt: Transport
   (▶/⏸, ⏮ Anfang) plus **pro Spur an/aus und frei wählbarer Kanal** – so kann man
   einzelne Instrumente stummschalten oder umrouten, ohne alles neu zu erzeugen.
-  Reine MIDI-Ausgabe (kein Audio); braucht nur einen eingestellten MIDI-Ausgang.
+  Bei **Schlagzeug-Spuren** (GM-Kanal 10) gibt es **„Schlagzeug-Noten…"**: je
+  vorhandener Tonhöhe eine **neue Note** wählen (+ **▸ Test**) – so lassen sich die
+  Komponenten auch in einer **bereits gespeicherten** Datei noch umlegen (eine
+  Neuerkennung aus Audio ist dann nicht mehr möglich, nur das Verschieben der
+  Tonhöhen). Reine MIDI-Ausgabe (kein Audio); braucht nur einen MIDI-Ausgang.
 - **Song-Sheet (Text + Akkorde)** (optional) – aus einer Datei entsteht ein
   **Chord-Sheet wie bei Ultimate Guitar**: die Akkorde stehen über den jeweiligen
   Wörtern des gesungenen Textes. Ablauf komplett **lokal/offline**: Demucs trennt

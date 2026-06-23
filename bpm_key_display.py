@@ -1587,6 +1587,28 @@ class DisplayApp:
                     pass
             return _upd
 
+        def _test_note(nv):
+            """Die aktuell gewaehlte Note kurz auf dem Drum-Kanal senden -- so
+            laesst sich pruefen, ob sie das richtige Geraet/Instrument triggert."""
+            try:
+                note = max(0, min(127, int(nv.get())))
+            except Exception:
+                return
+            c = load_config()
+            name = c.get("midi_output") or None
+            ch = int(c.get("midi_ch_drums", core.DRUM_DEFAULT_CHANNEL)) - 1
+
+            def _work():
+                port = None
+                try:
+                    port = self._acquire_midi_out(name)
+                    core.play_note(port, note, channel=ch)
+                except Exception:
+                    pass
+                finally:
+                    self._release_midi_out(port)
+            threading.Thread(target=_work, daemon=True).start()
+
         win = tk.Toplevel(self.root)
         win.title("Schlagzeug → MIDI")
         win.configure(bg=COL_BG)
@@ -1619,6 +1641,9 @@ class DisplayApp:
                               bg=COL_BG, fg=COL_ACCENT, width=5)
             nm_lbl.grid(row=r, column=3, padx=(6, 0), sticky="w")
             nv.trace_add("write", _mk_namelbl(nv, nm_lbl))
+            self._small_button(body, "▸ Test",
+                               lambda v=nv: _test_note(v)).grid(
+                                   row=r, column=4, padx=(10, 0))
 
         sens0 = float(cfg.get("drum_sensitivity", 0.5))
         sensv = tk.IntVar(value=int(round(max(0.0, min(1.0, sens0)) * 100)))
@@ -1676,6 +1701,112 @@ class DisplayApp:
         self._small_button(win, "Anwenden", _apply).pack(pady=(2, 2))
         self._small_button(win, "Schließen", win.destroy).pack(pady=(0, 10))
         win._a2m_drum_vars = (comp_vars, sensv)   # Tk-Variablen vor GC schuetzen
+
+    # General-MIDI-Schlagzeugnamen (Auszug) fuer die Remap-Anzeige
+    _GM_DRUMS = {35: "Bassdrum", 36: "Kick", 37: "Side Stick", 38: "Snare",
+                 39: "Clap", 40: "E-Snare", 41: "Floor Tom", 42: "HiHat zu",
+                 43: "Floor Tom hi", 44: "Pedal HiHat", 45: "Tom tief",
+                 46: "HiHat offen", 47: "Tom mittel", 48: "Tom hoch", 49: "Crash",
+                 50: "Tom hoch", 51: "Ride", 52: "China", 53: "Ride Bell",
+                 54: "Tamburin", 55: "Splash", 56: "Cowbell", 57: "Crash 2",
+                 59: "Ride 2"}
+
+    def _open_midi_remap_window(self, parent_win, mp, key, tr, chv):
+        """Tonhoehen-Remap fuer eine (Schlagzeug-)Spur einer GELADENEN MIDI-Datei:
+        je vorhandener Note eine neue waehlen + ▸ Test. Aendert die abgespielten
+        Noten live (mp.set_notes); arbeitet immer auf den Original-Tonhoehen, damit
+        man beliebig oft neu zuordnen kann. (Neuerkennung aus Audio ist nach dem
+        Speichern nicht mehr moeglich -- nur Verschieben.)"""
+        orig = list(tr.get("notes", []))
+        pitches = sorted({int(p) for _s, _e, p, _v in orig})
+        if not pitches:
+            messagebox.showinfo("Schlagzeug-Noten", "Keine Noten in dieser Spur.")
+            return
+        names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+        def note_name(n):
+            n = int(n)
+            return f"{names[n % 12]}{n // 12 - 1}"
+
+        def _mk_namelbl(var, lbl):
+            def _upd(*_a):
+                try:
+                    lbl.config(text=note_name(var.get()))
+                except Exception:
+                    pass
+            return _upd
+
+        def _test_note(nv):
+            try:
+                note = max(0, min(127, int(nv.get())))
+            except Exception:
+                return
+            name = load_config().get("midi_output") or None
+            ch = int(chv.get()) - 1
+
+            def _work():
+                port = None
+                try:
+                    port = self._acquire_midi_out(name)
+                    core.play_note(port, note, channel=ch)
+                except Exception:
+                    pass
+                finally:
+                    self._release_midi_out(port)
+            threading.Thread(target=_work, daemon=True).start()
+
+        win = tk.Toplevel(self.root)
+        win.title("Schlagzeug-Noten (MIDI-Datei)")
+        win.configure(bg=COL_BG)
+        win.transient(parent_win)
+        tk.Label(win, text="Schlagzeug-Noten neu zuordnen", font=self.f_h1,
+                 bg=COL_BG, fg=COL_FG).pack(pady=(12, 2))
+        tk.Label(win, text="je vorhandene Note eine neue wählen · ▸ Test sendet sie "
+                 "kurz auf dem Spur-Kanal", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_MUTED).pack(pady=(0, 8))
+        body = tk.Frame(win, bg=COL_BG)
+        body.pack(padx=20, pady=4)
+        row_vars = {}
+        for r, p in enumerate(pitches):
+            nv = tk.IntVar(value=p)
+            row_vars[p] = nv
+            lab = self._GM_DRUMS.get(p, "")
+            tk.Label(body, text=f"{p}  {note_name(p)}" + (f"  · {lab}" if lab else ""),
+                     font=self.f_small, bg=COL_BG, fg=COL_FG, anchor="w",
+                     width=20).grid(row=r, column=0, sticky="w", pady=2)
+            tk.Label(body, text="→", font=self.f_small, bg=COL_BG,
+                     fg=COL_MUTED).grid(row=r, column=1, padx=(6, 6))
+            tk.Spinbox(body, from_=0, to=127, textvariable=nv, width=4,
+                       font=self.f_small, bg=COL_SURFACE, fg=COL_FG,
+                       buttonbackground=COL_SURFACE, highlightthickness=0, bd=0,
+                       insertbackground=COL_FG, justify="center").grid(row=r, column=2)
+            nm = tk.Label(body, text=note_name(p), font=self.f_tiny, bg=COL_BG,
+                          fg=COL_ACCENT, width=5)
+            nm.grid(row=r, column=3, padx=(6, 0), sticky="w")
+            nv.trace_add("write", _mk_namelbl(nv, nm))
+            self._small_button(body, "▸ Test",
+                               lambda v=nv: _test_note(v)).grid(
+                                   row=r, column=4, padx=(10, 0))
+        status = tk.Label(win, text="", font=self.f_tiny, bg=COL_BG, fg=COL_MUTED)
+        status.pack(pady=(6, 2))
+
+        def _apply():
+            mapping = {}
+            for p, nv in row_vars.items():
+                try:
+                    mapping[p] = max(0, min(127, int(nv.get())))
+                except Exception:
+                    mapping[p] = p
+            new = [(s, e, mapping.get(int(p), int(p)), v) for (s, e, p, v) in orig]
+            try:
+                mp.set_notes(key, new)
+                status.config(text="Zuordnung übernommen.")
+            except Exception as ex:
+                status.config(text=f"Fehler: {ex}")
+
+        self._small_button(win, "Anwenden", _apply).pack(pady=(2, 2))
+        self._small_button(win, "Schließen", win.destroy).pack(pady=(0, 10))
+        win._a2m_remap_vars = row_vars            # Tk-Variablen vor GC schuetzen
 
     def _open_midi_file_player(self, path):
         """Laedt eine MIDI-Datei und spielt sie INSTRUMENTENWEISE ueber den
@@ -1767,6 +1898,13 @@ class DisplayApp:
                       font=self.f_tiny, width=2, cursor="hand2")
             om["menu"].config(bg=COL_SURFACE, fg=COL_FG)
             om.grid(row=r, column=2, sticky="w")
+            # Schlagzeug-Spur (GM-Kanal 10 oder Name „drum") -> Tonhoehen-Remap+Test
+            if int(tr["channel"]) == 9 or "drum" in str(tr["name"]).lower():
+                self._small_button(
+                    midf, "Schlagzeug-Noten…",
+                    lambda k=key, t=tr, c=chv:
+                    self._open_midi_remap_window(win, mp, k, t, c)).grid(
+                        row=r, column=3, sticky="w", padx=(10, 0))
         win._a2m_midi_vars = midi_vars         # Tk-Variablen vor GC schuetzen
 
         def _upd():
@@ -2448,6 +2586,7 @@ class DisplayApp:
         v_sheet = tk.BooleanVar(value=False)
         v_play = tk.BooleanVar(value=False)
         v_stemmidi = tk.BooleanVar(value=False)
+        v_barcut = tk.BooleanVar(value=bool(cfg.get("stem_barcut", False)))
 
         def _section(text):
             tk.Label(body, text=text, font=self.f_tiny, bg=COL_BG, fg=COL_ACCENT,
@@ -2528,6 +2667,12 @@ class DisplayApp:
                  "Abspielen/Stems-MIDI, sonst schnell (fürs Song-Sheet reicht das).",
                  font=self.f_tiny, bg=COL_BG, fg=COL_MUTED,
                  justify="left").pack(anchor="w", pady=(4, 0))
+        _cb("Stems auf Takt schneiden – Sample mit 2 Takten Vorlauf (nur Export)",
+            v_barcut, demucs_ok)
+        tk.Label(body, text="Schneidet alle exportierten Stems gemeinsam: Start "
+                 "exakt 2 Takte vor dem ersten Downbeat (4/4); der Auftakt liegt im "
+                 "Vorlauf. Ende bleibt unverändert.", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_MUTED, justify="left").pack(anchor="w", pady=(2, 0))
         result = {}
 
         def _ok():
@@ -2545,7 +2690,7 @@ class DisplayApp:
             model = next(v for lbl, v in model_map if lbl == mvar.get())
             qual = next(v for lbl, v in qual_map if lbl == qvar.get())
             new_cfg = {**load_config(), "sheet_lang": lang, "sheet_model": model,
-                       "stem_quality": qual}
+                       "stem_quality": qual, "stem_barcut": bool(v_barcut.get())}
             if out_dir:
                 new_cfg["last_save_dir"] = out_dir
             save_config(new_cfg)
@@ -2560,6 +2705,7 @@ class DisplayApp:
             result.update(clock=bool(v_clock.get()) if allow_clock else False,
                           export=bool(v_export.get()), sheet=bool(v_sheet.get()),
                           play=bool(v_play.get()), stemmidi=bool(v_stemmidi.get()),
+                          barcut=bool(v_barcut.get()),
                           out_dir=out_dir, overlap=0.25 if hi else 0.1,
                           language=None if lang == "auto" else lang, model=model)
             win.destroy()
@@ -2625,8 +2771,12 @@ class DisplayApp:
             if actions["export"]:
                 self._stem_progress(log, step, total, "Stems exportieren")
                 self._stem_log(log, "== Stems exportieren ==")
+                exp_stems = stems
+                if actions.get("barcut"):          # nur die EXPORTIERTEN Stems schneiden
+                    self._stem_log(log, "Auf Takt schneiden (2 Takte Vorlauf) …")
+                    exp_stems = core.bar_aligned_stems(stems, ssr, log=cb)
                 out["export_paths"] = core.write_stems_to_files(
-                    stems, ssr, actions["out_dir"], base=title, log=cb)
+                    exp_stems, ssr, actions["out_dir"], base=title, log=cb)
                 step += 1
             if actions["sheet"]:
                 self._stem_progress(log, step, total, "Song-Sheet")
