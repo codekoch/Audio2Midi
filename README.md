@@ -39,6 +39,7 @@ Eingänge; unter macOS leistet das ein virtuelles Ausgabegerät wie
 | **Stems** | Gesang/Bass/Drums/Rest lokal trennen (Demucs) – exportieren oder abspielen. |
 | **Song-Sheet** | Gesangstext + Akkorde im Ultimate-Guitar-Stil (lokal, Whisper + Forced Alignment). |
 | **Stems → MIDI** | Bass/Rest/Gesang via Basic Pitch nach MIDI, je Kanal; optional MIDI-Clock mitsenden; als `.mid` speichern. |
+| **Schlagzeug → MIDI** | Drums in Kick/Snare/HiHat (+ optional Tom/Crash) zerlegen, Note je Komponente frei wählbar; Standard GM-Drum-Map auf Kanal 10. |
 | **MIDI-Datei laden** | Eine `.mid` spurweise (an/aus + Kanal) über den MIDI-Ausgang abspielen. |
 | **DJ-Modus** | Zwei Decks, Equal-Power-Crossfade; die Clock folgt dem Ziel-Deck. |
 | **Aufnahme** | Live-Signal mitschneiden und als Datei(en) speichern. |
@@ -57,6 +58,8 @@ siehe [Webversion](#webversion-browser).
 - **Spuren → MIDI aufnehmen:** MIDI-Ausgang einstellen → **Datei …** →
   **Stems → MIDI** → im Stem-Player Spuren/Kanäle wählen, **MIDI-Clock mitsenden**
   an → **▶**; die DAW nimmt taktsynchron auf. Alternativ **MIDI speichern…** (`.mid`).
+- **Schlagzeug → MIDI:** im Stem-Player **„Schlagzeug…"** → je Komponente Note wählen
+  (Default GM-Drum-Map, Kanal 10), **Empfindlichkeit** justieren → **Anwenden**.
 - **Datei als MIDI-Clock:** **Datei …** → nur **MIDI-Clock-Ausgabe** → **▶ Start / ■ Stopp**.
 - **MIDI-Ausgang prüfen:** Einstellungen → **▶ MIDI-Ausgang testen** (Dreiklang hörbar?).
 
@@ -178,8 +181,24 @@ siehe [Webversion](#webversion-browser).
   **mehrspurige MIDI-Datei** aller aktuell aktiven Spuren (je eigener Kanal)
   exportieren, um später daran weiterzuarbeiten. Braucht `basic-pitch` **und** einen
   eingestellten MIDI-Ausgang; auf Windows/Python 3.12 ohne TensorFlow installieren
-  (siehe `requirements.txt`: `--no-deps` + `onnxruntime`). **Drums** werden bewusst
-  **nicht** nach MIDI gewandelt (tonlos).
+  (siehe `requirements.txt`: `--no-deps` + `onnxruntime`). Der **Drums-Stem** läuft
+  nicht über Basic Pitch (tonlos), sondern über einen eigenen Weg – siehe nächster
+  Punkt.
+- **Schlagzeug → MIDI** (optional) – der **Drums-Stem** wird per **band-weiser
+  Onset-Erkennung** je Schlagzeug-Komponente in MIDI-Schläge gewandelt: für **Kick,
+  Snare, HiHat** (zuverlässig) und optional **Tom** sowie **Crash/Becken**
+  („best effort", standardmäßig aus) wird in einem eigenen **Frequenzband** nach
+  Anschlägen gesucht – so werden auch **gleichzeitige** Schläge (z. B. Kick + HiHat)
+  sauber getrennt. Eine **Kick-Dominanz-Sperre** verhindert Phantom-Snares durch den
+  breitbandigen Kick-Anschlag. Über den Knopf **„Schlagzeug…"** im Stem-Player öffnet
+  sich ein **eigenes Fenster**: je Komponente **an/aus** und **frei wählbare
+  MIDI-Note** (vorbelegt mit der **General-MIDI-Drum-Map**, Kick 36 / Snare 38 /
+  HiHat 42 …) plus ein **Empfindlichkeits-Regler**. Die Drums laufen als eigene Spur
+  (Standard **Kanal 10**, GM-Schlagzeug) **synchron** mit, lassen sich an-/abschalten
+  und gemeinsam mit den anderen Spuren in die **MIDI-Datei** exportieren. Braucht
+  **keine** Zusatzbibliothek (nur `librosa`). Hinweis: Kick/Snare/HiHat sitzen gut;
+  Tom, Crash, Ride, Ghost-Notes und schnelle Wirbel sind heuristisch und können
+  über-/untertriggern – dafür gibt es den Empfindlichkeits-Regler und das An/Aus.
 - **MIDI-Datei laden & instrumentenweise abspielen** – über „Datei laden …" lässt
   sich auch direkt eine **`.mid`-Datei** öffnen (z. B. eine zuvor exportierte). Sie
   wird **spurweise** über den eingestellten MIDI-Ausgang abgespielt: Transport

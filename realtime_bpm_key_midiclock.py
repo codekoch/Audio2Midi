@@ -4038,6 +4038,123 @@ def stems_to_midi_notes(stems, sr, names=STEM_MIDI_NAMES, min_note_ms=130.0,
     return out
 
 
+# --- Schlagzeug -> MIDI (eigener Weg; basic-pitch ist fuer Tonloses ungeeignet) ---
+# Idee: je Schlagzeug-Komponente ein eigenes Frequenzband und DARIN Onsets suchen.
+# Weil jedes Band fuer sich ausgewertet wird, werden GLEICHZEITIGE Schlaege (z. B.
+# Kick + HiHat) sauber getrennt -- besser als jeden Onset einzeln zu klassifizieren.
+# Kick/Snare/HiHat sind zuverlaessig (klar getrennte Baender); Tom/Crash sind
+# "best effort" (ueberlappende Baender) und daher standardmaessig AUS.
+#   key, label (DE),  (lo_hz, hi_hz),    GM-Note, default_on, Dauer_s
+DRUM_COMPONENTS = [
+    ("kick",  "Kick",          (20.0, 130.0),   36, True,  0.10),
+    ("snare", "Snare",         (190.0, 2400.0), 38, True,  0.10),
+    ("hihat", "HiHat",         (6000.0, 0.0),   42, True,  0.05),  # hi=0 -> bis Nyquist
+    ("tom",   "Tom",           (130.0, 280.0),  45, False, 0.14),
+    ("crash", "Crash/Becken",  (2800.0, 6000.0),49, False, 0.40),
+]
+DRUM_DEFAULT_CHANNEL = 10   # General-MIDI-Schlagzeugkanal (1-basiert)
+
+
+def drum_default_mapping():
+    """Default-Zuordnung {key: {'on': bool, 'note': int}} aus DRUM_COMPONENTS."""
+    return {k: {"on": on, "note": note}
+            for k, _lab, _band, note, on, _dur in DRUM_COMPONENTS}
+
+
+def drums_to_midi_notes(audio, sr, mapping=None, sensitivity=0.5, log=None):
+    """Wandelt den Drums-Stem in MIDI-Schlaege. Pro Komponente (siehe
+    DRUM_COMPONENTS) wird im zugehoerigen Frequenzband nach Onsets gesucht; jeder
+    Treffer wird zu einem kurzen MIDI-Schlag mit fester Note. 'mapping' (optional)
+    ueberschreibt je Komponente {'on': bool, 'note': int}; fehlt es, gelten die
+    Defaults (Kick/Snare/HiHat an, Tom/Crash aus). 'sensitivity' 0..1 steuert, wie
+    viele Schlaege erkannt werden (hoeher = mehr, aber auch mehr Fehltreffer).
+    Rueckgabe: Notenliste [(start_s, end_s, pitch, velocity), ...] -- passt direkt
+    in MultiStemMidiPlayer und write_stems_midi_file (alle Noten auf demselben
+    Schlagzeug-Kanal)."""
+    import librosa
+    y = np.asarray(audio, dtype=np.float32)
+    if y.ndim == 2:
+        y = y.mean(axis=1)
+    if y.size < 2048:
+        return []
+    sr = int(sr)
+    nyq = sr / 2.0
+    hop, n_fft = 512, 2048
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
+    sens = float(min(1.0, max(0.0, sensitivity)))
+    # Empfindlichkeit -> Schwelle (delta, auf 0..1 normierte Huellkurve) und
+    # Mindestabstand zweier Schlaege (verhindert Doppel-Trigger).
+    delta = 0.30 * (1.0 - sens) + 0.02            # ~0.02 (sehr empfindlich) .. 0.32
+    wait_s = 0.03 + 0.05 * (1.0 - sens)           # 30..80 ms
+    wait = max(1, int(round(wait_s * sr / hop)))
+
+    def band_mean(lo, hi):
+        """Mittlere Magnitude PRO Bin im Band (so sind Baender vergleichbar, egal
+        wie breit sie sind)."""
+        hi_eff = nyq if (not hi or hi <= 0 or hi > nyq) else hi
+        rows = (freqs >= lo) & (freqs < hi_eff)
+        if not rows.any():
+            return None
+        return S[rows, :].mean(axis=0)
+
+    # Kick-Band-Energie immer vorab (fuer die Kick-Dominanz-Sperre bei Snare/Tom --
+    # der breitbandige Kick-Anschlag schlaegt sonst als Phantom-Snare durch).
+    kick_env = band_mean(*DRUM_COMPONENTS[0][2])
+    KICK_DOM = 1.5
+
+    notes, counts = [], {}
+    for key, label, (lo, hi), gm_note, def_on, dur in DRUM_COMPONENTS:
+        spec = (mapping or {}).get(key, {})
+        if not spec.get("on", def_on):
+            continue
+        note = int(spec.get("note", gm_note)) % 128
+        env = band_mean(lo, hi)
+        if env is None:
+            continue
+        # Onset-Huellkurve = positiver spektraler Fluss im Band (nur Anstieg zaehlt).
+        oenv = np.maximum(0.0, np.diff(env, prepend=env[0])).astype(np.float32)
+        peak = float(oenv.max())
+        if peak <= 0:
+            continue
+        oenv /= peak
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            on_frames = librosa.onset.onset_detect(
+                onset_envelope=oenv, sr=sr, hop_length=hop, units="frames",
+                delta=delta, wait=wait, backtrack=False)
+        suppress = key in ("snare", "tom") and kick_env is not None
+        kept = 0
+        for fr in on_frames:
+            # vom Kick durchgeschlagen? (Kick-Band hier deutlich lauter -> verwerfen)
+            if suppress and kick_env[fr] > KICK_DOM * env[fr]:
+                continue
+            t = float(times[fr])
+            vel = int(min(127, max(20, round(float(oenv[fr]) * 107) + 20)))
+            notes.append((t, t + dur, note, vel))
+            kept += 1
+        counts[label] = kept
+    notes.sort(key=lambda n: n[0])
+    # Gleiche Note nie ueberlappen lassen (Drum-One-Shots): Ende auf den naechsten
+    # gleichen Schlag kuerzen. Sonst haengende Toene live und verlustbehafteter
+    # MIDI-Datei-Roundtrip (zweites note_on vor dem ersten note_off).
+    last_idx = {}
+    for i, (s, e, p, v) in enumerate(notes):
+        j = last_idx.get(p)
+        if j is not None:
+            ps, pe, pp, pv = notes[j]
+            if pe > s:
+                notes[j] = (ps, max(ps, s - 0.001), pp, pv)
+        last_idx[p] = i
+    if log is not None:
+        summ = ", ".join(f"{k}: {v}" for k, v in counts.items()) or "keine"
+        _emit(log, f"Schlagzeug -> MIDI: {len(notes)} Schlaege ({summ}).")
+    return notes
+
+
 def write_stems_midi_file(tracks, path, bpm=120.0, ppq=480):
     """Schreibt eine MEHRSPURIGE MIDI-Datei. tracks = Liste (name, notes, channel)
     mit notes=[(start_s, end_s, pitch, velocity), ...]; jede Spur bekommt ihren

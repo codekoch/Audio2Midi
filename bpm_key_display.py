@@ -1242,11 +1242,17 @@ class DisplayApp:
                 midi_player["obj"] = mp
                 midi_player["port"] = port
                 order = [n for n in core.STEM_MIDI_NAMES if n in midi_notes]
-                def_ch = {"bass": 1, "other": 2, "vocals": 3}
+                has_drums = "drums" in midi_notes
+                def_ch = {"bass": 1, "other": 2, "vocals": 3,
+                          "drums": core.DRUM_DEFAULT_CHANNEL}
                 for i, nm in enumerate(order):
                     ch = int(cfg.get("midi_ch_" + nm, def_ch.get(nm, i + 1)))
                     mp.set_track(nm, midi_notes[nm], channel=ch - 1,
                                  enabled=(nm == "bass"))   # Bass standardmaessig an
+                if has_drums:
+                    dch = int(cfg.get("midi_ch_drums", core.DRUM_DEFAULT_CHANNEL))
+                    mp.set_track("drums", midi_notes["drums"], channel=dch - 1,
+                                 enabled=True)             # Schlagzeug standardmaessig an
                 mp.start()
                 mp.set_clock(False, bpm)       # Tempo merken, Clock zunaechst aus
 
@@ -1302,8 +1308,9 @@ class DisplayApp:
                     return _f
 
                 midi_vars = {}
-                for r, nm in enumerate(order, start=2):
-                    onv = tk.BooleanVar(value=(nm == "bass"))
+                rows_spec = list(order) + (["drums"] if has_drums else [])
+                for r, nm in enumerate(rows_spec, start=2):
+                    onv = tk.BooleanVar(value=(nm in ("bass", "drums")))
                     chv = tk.IntVar(value=int(cfg.get("midi_ch_" + nm,
                                                       def_ch.get(nm, r))))
                     midi_vars[nm] = (onv, chv)
@@ -1323,13 +1330,20 @@ class DisplayApp:
                               font=self.f_tiny, width=2, cursor="hand2")
                     om["menu"].config(bg=COL_SURFACE, fg=COL_FG)
                     om.grid(row=r, column=2, sticky="w")
+                    if nm == "drums":
+                        # eigenes Fenster: Note je Schlagzeug-Komponente + Empfindlichkeit
+                        self._small_button(
+                            midf, "Schlagzeug…",
+                            lambda mpr=mp: self._open_drum_window(
+                                win, mpr, stems_dict, sr)).grid(
+                                    row=r, column=3, sticky="w", padx=(8, 0))
                 win._a2m_midi_vars = midi_vars   # Tk-Variablen vor GC schuetzen
 
                 # duenne Trennlinie zwischen Spuren und Dichte/Export
                 sep = tk.Frame(midf, bg=COL_SURFACE, height=1)
-                sep.grid(row=len(order) + 2, column=0, columnspan=3, sticky="we",
+                sep.grid(row=len(rows_spec) + 2, column=0, columnspan=4, sticky="we",
                          padx=6, pady=(6, 4))
-                crow = len(order) + 3
+                crow = len(rows_spec) + 3
                 minms = tk.IntVar(value=int(cfg.get("bass_min_ms", 130)))
                 win._a2m_minms = minms
                 mslbl = tk.Label(midf, text=f"Dichte: Mindestnote {minms.get()} ms",
@@ -1438,6 +1452,130 @@ class DisplayApp:
         self._small_button(win, "Schließen", _close).pack(pady=8)
         _upd()
         return player
+
+    def _drum_settings(self):
+        """Schlagzeug-Zuordnung {key:{'on','note'}} + Empfindlichkeit (0..1) aus
+        der Konfiguration, mit Defaults aus core.DRUM_COMPONENTS."""
+        cfg = load_config()
+        mapping = {}
+        for key, _lab, _band, note, on, _dur in core.DRUM_COMPONENTS:
+            mapping[key] = {"on": bool(cfg.get(f"drum_on_{key}", on)),
+                            "note": int(cfg.get(f"drum_note_{key}", note))}
+        return mapping, float(cfg.get("drum_sensitivity", 0.5))
+
+    def _open_drum_window(self, parent_win, mp, stems_dict, sr):
+        """Separates Fenster: je Schlagzeug-Komponente (Kick/Snare/HiHat/Tom/Crash)
+        an/aus + frei waehlbare MIDI-Note, dazu ein Empfindlichkeits-Regler.
+        „Anwenden" erkennt die Schlaege neu (band-weise Onsets) und schickt sie als
+        Spur „drums" synchron zur Wiedergabe. Einstellungen werden gemerkt."""
+        drums = stems_dict.get("drums")
+        if drums is None:
+            messagebox.showinfo("Schlagzeug → MIDI", "Kein Schlagzeug-Stem vorhanden.")
+            return
+        cfg = load_config()
+        names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+        def note_name(n):
+            n = int(n)
+            return f"{names[n % 12]}{n // 12 - 1}"
+
+        def _mk_namelbl(var, lbl):
+            def _upd(*_a):
+                try:
+                    lbl.config(text=note_name(var.get()))
+                except Exception:
+                    pass
+            return _upd
+
+        win = tk.Toplevel(self.root)
+        win.title("Schlagzeug → MIDI")
+        win.configure(bg=COL_BG)
+        win.transient(parent_win)
+        tk.Label(win, text="Schlagzeug → MIDI", font=self.f_h1, bg=COL_BG,
+                 fg=COL_FG).pack(pady=(12, 2))
+        tk.Label(win, text="Note je Komponente wählen · Kick/Snare/HiHat sicher, "
+                 "Tom/Crash „best effort“", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_MUTED).pack(pady=(0, 8))
+
+        body = tk.Frame(win, bg=COL_BG)
+        body.pack(padx=20, pady=4)
+        comp_vars = {}
+        for r, (key, label, _band, dnote, don, _dur) in enumerate(core.DRUM_COMPONENTS):
+            onv = tk.BooleanVar(value=bool(cfg.get(f"drum_on_{key}", don)))
+            nv = tk.IntVar(value=int(cfg.get(f"drum_note_{key}", dnote)))
+            comp_vars[key] = (onv, nv)
+            tk.Checkbutton(body, text=label, variable=onv, font=self.f_small,
+                           bg=COL_BG, fg=COL_FG, selectcolor=COL_SURFACE,
+                           activebackground=COL_BG, activeforeground=COL_FG, bd=0,
+                           highlightthickness=0, anchor="w", width=12).grid(
+                               row=r, column=0, sticky="w", pady=2)
+            tk.Label(body, text="Note", font=self.f_tiny, bg=COL_BG,
+                     fg=COL_MUTED).grid(row=r, column=1, padx=(8, 2))
+            tk.Spinbox(body, from_=0, to=127, textvariable=nv, width=4,
+                       font=self.f_small, bg=COL_SURFACE, fg=COL_FG,
+                       buttonbackground=COL_SURFACE, highlightthickness=0, bd=0,
+                       insertbackground=COL_FG, justify="center").grid(row=r, column=2)
+            nm_lbl = tk.Label(body, text=note_name(nv.get()), font=self.f_tiny,
+                              bg=COL_BG, fg=COL_ACCENT, width=5)
+            nm_lbl.grid(row=r, column=3, padx=(6, 0), sticky="w")
+            nv.trace_add("write", _mk_namelbl(nv, nm_lbl))
+
+        sens0 = float(cfg.get("drum_sensitivity", 0.5))
+        sensv = tk.IntVar(value=int(round(max(0.0, min(1.0, sens0)) * 100)))
+        sfr = tk.Frame(win, bg=COL_BG)
+        sfr.pack(padx=20, pady=(10, 2), fill="x")
+        slbl = tk.Label(sfr, text=f"Empfindlichkeit: {sensv.get()} %",
+                        font=self.f_tiny, bg=COL_BG, fg=COL_FG)
+        slbl.pack(anchor="w")
+        tk.Scale(sfr, from_=0, to=100, resolution=5, orient="horizontal",
+                 variable=sensv, showvalue=False, length=220,
+                 command=lambda v: slbl.config(
+                     text=f"Empfindlichkeit: {int(float(v))} %"),
+                 bg=COL_BG, fg=COL_FG, troughcolor=COL_SURFACE, highlightthickness=0,
+                 bd=0, sliderrelief="flat", activebackground=COL_OK,
+                 width=12).pack(anchor="w")
+
+        status = tk.Label(win, text="", font=self.f_tiny, bg=COL_BG, fg=COL_MUTED)
+        status.pack(pady=(6, 2))
+
+        def _apply():
+            cfg2 = load_config()
+            mapping = {}
+            for key, (onv, nv) in comp_vars.items():
+                try:
+                    note = max(0, min(127, int(nv.get())))
+                except Exception:
+                    note = core.drum_default_mapping()[key]["note"]
+                mapping[key] = {"on": bool(onv.get()), "note": note}
+                cfg2[f"drum_on_{key}"] = bool(onv.get())
+                cfg2[f"drum_note_{key}"] = note
+            sens = max(0.0, min(1.0, sensv.get() / 100.0))
+            cfg2["drum_sensitivity"] = sens
+            save_config(cfg2)
+            status.config(text="erkenne Schläge …")
+
+            def _work():
+                try:
+                    notes = core.drums_to_midi_notes(drums, sr, mapping=mapping,
+                                                     sensitivity=sens)
+                except Exception as ex:
+                    self.root.after(0, lambda e=ex: status.config(
+                        text=f"Fehler: {e}"))
+                    return
+
+                def _done():
+                    try:
+                        mp.set_notes("drums", notes)
+                    except Exception:
+                        pass
+                    if status.winfo_exists():
+                        status.config(text=f"{len(notes)} Schläge erkannt – aktiv.")
+                self.root.after(0, _done)
+            threading.Thread(target=_work, daemon=True).start()
+
+        self._small_button(win, "Anwenden", _apply).pack(pady=(2, 2))
+        self._small_button(win, "Schließen", win.destroy).pack(pady=(0, 10))
+        win._a2m_drum_vars = (comp_vars, sensv)   # Tk-Variablen vor GC schuetzen
 
     def _open_midi_file_player(self, path):
         """Laedt eine MIDI-Datei und spielt sie INSTRUMENTENWEISE ueber den
@@ -2409,6 +2547,16 @@ class DisplayApp:
                 min_ms = float(load_config().get("bass_min_ms", 130))
                 out["midi_notes"] = core.stems_to_midi_notes(
                     stems, ssr, min_note_ms=min_ms, log=cb)
+                # Schlagzeug separat (band-weise Onsets statt basic-pitch)
+                if stems.get("drums") is not None:
+                    self._stem_log(log, "== Schlagzeug → MIDI ==")
+                    try:
+                        dmap, dsens = self._drum_settings()
+                        out["midi_notes"]["drums"] = core.drums_to_midi_notes(
+                            stems["drums"], ssr, mapping=dmap,
+                            sensitivity=dsens, log=cb)
+                    except Exception as ex:
+                        self._stem_log(log, f"Schlagzeug→MIDI übersprungen: {ex}")
             # Stem-Player oeffnen, wenn Abspielen ODER Stems-MIDI gewaehlt ist
             # (die MIDI-Spuren laufen synchron zur Stem-Position mit).
             if actions["play"] or actions.get("stemmidi"):
