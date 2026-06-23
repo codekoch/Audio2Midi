@@ -131,7 +131,7 @@ def save_config(cfg):
 class DisplayApp:
     def __init__(self, root, fullscreen, force_setup=False):
         self.root = root
-        root.title("BPM & Tonart")
+        root.title("AudioWizard")
         root.configure(bg=COL_BG)
         root.geometry("800x600")
         root.minsize(480, 360)
@@ -3213,6 +3213,60 @@ class DisplayApp:
             self.root.after_idle(self._reflow)
 
 
+def _show_splash(root):
+    """Zeigt kurz das Startbild (audiowizard.jpg) randlos und zentriert, waehrend
+    das Hauptfenster im Hintergrund aufgebaut wird. Fehlt das Bild oder Pillow,
+    passiert nichts (kein Splash, kein Fehler). Rueckgabe: Splash-Fenster oder None."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiowizard.jpg")
+    if not os.path.exists(path):
+        return None
+    try:
+        from PIL import Image, ImageTk
+        img = Image.open(path)
+    except Exception:
+        return None
+    try:
+        root.withdraw()                       # Hauptfenster verdeckt aufbauen
+        splash = tk.Toplevel(root)
+        splash.overrideredirect(True)         # randlos
+        splash.configure(bg=COL_BG)
+        maxw, maxh = 520, 520                  # sehr grosse Bilder herunterskalieren
+        w, h = img.size
+        scale = min(1.0, maxw / w, maxh / h)
+        if scale < 1.0:
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        lbl = tk.Label(splash, image=photo, bd=0, bg=COL_BG)
+        lbl.image = photo                      # Referenz halten (sonst GC)
+        lbl.pack()
+        splash.update_idletasks()
+        sw, sh = splash.winfo_width(), splash.winfo_height()
+        x = (splash.winfo_screenwidth() - sw) // 2
+        y = (splash.winfo_screenheight() - sh) // 2
+        splash.geometry(f"+{x}+{y}")
+        splash.lift()
+        splash.update()
+        return splash
+    except Exception:
+        try:
+            root.deiconify()
+        except Exception:
+            pass
+        return None
+
+
+def _close_splash(root, splash):
+    try:
+        splash.destroy()
+    except Exception:
+        pass
+    try:
+        root.deiconify()
+        root.lift()
+    except Exception:
+        pass
+
+
 def main():
     fullscreen = sys.platform.startswith("linux")
     if "--windowed" in sys.argv:
@@ -3227,7 +3281,10 @@ def main():
         pass
 
     root = tk.Tk()
+    splash = _show_splash(root)
     DisplayApp(root, fullscreen, force_setup)
+    if splash is not None:
+        root.after(1600, lambda: _close_splash(root, splash))
     root.mainloop()
 
 

@@ -1,4 +1,4 @@
-# Audio2Midi
+# AudioWizard
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Plattform](https://img.shields.io/badge/Plattform-Windows%20%C2%B7%20macOS%20%C2%B7%20Raspberry%20Pi%20%C2%B7%20Linux-555)
@@ -300,7 +300,7 @@ identisch. Drei Besonderheiten:
   fragt macOS nach der Mikrofon-Freigabe für das Terminal (bzw. die
   Python-App) – einmal erlauben.
 - **MIDI-Ausgang:** In der MIDI-Liste gibt es den Eintrag „Virtueller Port
-  ‚Audio2Midi Clock‘ erzeugen“ (CoreMIDI) – der Port erscheint dann in der
+  ‚AudioWizard Clock‘ erzeugen“ (CoreMIDI) – der Port erscheint dann in der
   DAW als MIDI-Eingang, ganz ohne IAC-Treiber. Alternativ funktioniert
   natürlich auch der IAC-Bus aus dem Audio-MIDI-Setup oder ein
   USB-MIDI-Interface.
@@ -336,7 +336,7 @@ sauberen MIDI-Akkord sendet, sowie einen **DJ-Modus** (zwei Decks nebeneinander,
 Audio-Crossfade, MIDI-Clock folgt dem überblendeten Track). Einfach im Browser
 öffnen – kein Server nötig.
 
-👉 **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
+👉 **Online ausprobieren:** <a href="https://codekoch.github.io/audiowizard/webapp/">https://codekoch.github.io/audiowizard/webapp/</a>
 
 Details in [webapp/README.md](webapp/README.md).
 

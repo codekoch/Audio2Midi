@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Audio2Midi -- BPM, MIDI-Clock & Tonart (Webversion)</title>
+<title>AudioWizard -- BPM, MIDI-Clock & Tonart (Webversion)</title>
 <!--
-  Audio2Midi Webversion: BPM-Erkennung mit MIDI-Clock, Tonerkennung mit Midi-Ausgabe und Tonart-Anzeige -- eine eigenstaendige HTML-Datei. Laeuft direkt im Browser
+  AudioWizard Webversion: BPM-Erkennung mit MIDI-Clock, Tonerkennung mit Midi-Ausgabe und Tonart-Anzeige -- eine eigenstaendige HTML-Datei. Laeuft direkt im Browser
   (Doppelklick / Strg+O) oder ueber GitHub Pages; kein Server noetig.
 
   Quelle wahlweise Mikrofon/Line-In (getUserMedia) ODER die Wiedergabe
@@ -186,7 +186,7 @@ main.djmode .sv { display: none !important; }   /* Einzeltrack-Anzeige im DJ-Mod
 </head>
 <body>
   <header>
-    <h1>Audio2Midi</h1>
+    <h1>AudioWizard</h1>
     <span class="sub">BPM-Erkennung mit MIDI-Clock, Tonerkennung mit Midi-Ausgabe und Tonarterkennung &middot; Webversion</span>
   </header>
 
@@ -1349,7 +1349,7 @@ let recBlob = null;            // fertige Aufnahme (Original, fuer WebM-Speicher
 let recSegments = [];          // erkannte Stuecke fuer das Speichern-Panel
 let recMonitoring = false;     // Live-Analyse (Pegel/BPM/Tonart) waehrend Bereitstellen+Aufnahme
 let lastSaveDir = null;        // zuletzt gewaehlter Ordner (FileSystem-Handle) -> startIn
-const SAVE_PICKER_ID = 'audio2midi-save';   // Browser merkt sich pro id den letzten Ordner
+const SAVE_PICKER_ID = 'audiowizard-save';   // Browser merkt sich pro id den letzten Ordner
 
 // Beat-Sync (Clock-Phasenkopplung) -- optional, Standard an
 let beatSyncEnabled = true;

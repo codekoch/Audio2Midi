@@ -24,8 +24,8 @@ sudo apt update
 sudo apt install -y python3-venv python3-tk libportaudio2 libsndfile1 \
                     libasound2-dev build-essential
 
-python3 -m venv ~/audio2midi-env
-source ~/audio2midi-env/bin/activate
+python3 -m venv ~/audiowizard-env
+source ~/audiowizard-env/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
@@ -45,7 +45,7 @@ Hinweise:
 ## Starten
 
 ```bash
-source ~/audio2midi-env/bin/activate
+source ~/audiowizard-env/bin/activate
 python bpm_key_display.py
 ```
 
@@ -89,7 +89,7 @@ python bpm_key_display.py
 
 ## Diagnose und Wartung
 
-- Fehler und Neustarts der Analyse landen in `audio2midi.log` neben den
+- Fehler und Neustarts der Analyse landen in `audiowizard.log` neben den
   Skripten -- im Kiosk-Betrieb ohne Konsole die erste Anlaufstelle.
 - Der Analyse-Thread ist doppelt abgesichert: Er startet sich nach einem
   unerwarteten Fehler selbst neu, und die GUI überwacht ihn zusätzlich
@@ -116,7 +116,7 @@ Inhalt (Pfade ggf. anpassen):
 [Desktop Entry]
 Type=Application
 Name=BPM Display
-Exec=/home/pi/audio2midi-env/bin/python /home/pi/Audio2Midi/bpm_key_display.py
+Exec=/home/pi/audiowizard-env/bin/python /home/pi/audiowizard/bpm_key_display.py
 X-GNOME-Autostart-enabled=true
 ```
 
@@ -139,8 +139,8 @@ sudo apt install -y python3-venv python3-tk libportaudio2 libsndfile1 \
                     matchbox-window-manager x11-xserver-utils \
                     fonts-dejavu-core
 
-python3 -m venv ~/audio2midi-env
-source ~/audio2midi-env/bin/activate
+python3 -m venv ~/audiowizard-env
+source ~/audiowizard-env/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
@@ -174,8 +174,8 @@ sudo raspi-config   # System Options -> Boot / Auto Login -> Console Autologin
 #!/bin/sh
 xset s off -dpms            # Bildschirmschoner und Blanking aus
 matchbox-window-manager -use_cursor no &
-exec $HOME/audio2midi-env/bin/python \
-     $HOME/Audio2Midi/bpm_key_display.py --fullscreen
+exec $HOME/audiowizard-env/bin/python \
+     $HOME/audiowizard/bpm_key_display.py --fullscreen
 ```
 
 Und am Ende von `~/.bash_profile` (startet X nur auf der ersten Konsole,
@@ -210,7 +210,7 @@ Wichtig:
   MIDI-Ausgang und Optionen festlegen, damit `display_config.json`
   geschrieben ist – mit aktivem Overlay gehen Änderungen daran beim
   Ausschalten verloren.
-- Logs (`audio2midi.log`, optional `akkorde.txt`) landen dann ebenfalls
+- Logs (`audiowizard.log`, optional `akkorde.txt`) landen dann ebenfalls
   nur noch flüchtig im RAM. Für die Fehlersuche das Overlay vorübergehend
   deaktivieren.
 - Für Updates (git pull, pip install, Einstellungs-Änderungen) das Overlay

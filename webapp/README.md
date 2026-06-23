@@ -1,4 +1,4 @@
-# Audio2Midi -- Webversion (BPM, MIDI-Clock & Tonart)
+# AudioWizard -- Webversion (BPM, MIDI-Clock & Tonart)
 
 Eine schlanke Browser-Variante des Projekts: Tempo-Erkennung (BPM) mit
 **stabiler MIDI-Clock-Ausgabe** (24 PPQN), optional auch die **Grundtonart**
@@ -9,7 +9,7 @@ dient ein Audio-Eingang **oder** die **mitgehörte Wiedergabe**
 (Tab-/System-Audio). Keine Installation, kein Python, kein Server -- die ganze
 App steckt in einer einzigen Datei: **`index.html`**.
 
-> **Online ausprobieren:** <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
+> **Online ausprobieren:** <a href="https://codekoch.github.io/audiowizard/webapp/">https://codekoch.github.io/audiowizard/webapp/</a>
 
 ![Webversion im Browser](../docs/screenshot_webapp.png)
 
@@ -338,4 +338,4 @@ hochaufgelösten) STFT statt der CQT des Python-Projekts.
 
 ## Veröffentlichung über GitHub Pages
 
-- Teste die Webversion direkt unter <a href="https://codekoch.github.io/Audio2Midi/webapp/">https://codekoch.github.io/Audio2Midi/webapp/</a>
+- Teste die Webversion direkt unter <a href="https://codekoch.github.io/audiowizard/webapp/">https://codekoch.github.io/audiowizard/webapp/</a>

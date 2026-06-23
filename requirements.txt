@@ -1,4 +1,4 @@
-# Audio2Midi -- Abhaengigkeiten
+# AudioWizard -- Abhaengigkeiten
 # Installation:  pip install -r requirements.txt
 numpy
 librosa

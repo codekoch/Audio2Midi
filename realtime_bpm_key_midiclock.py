@@ -102,7 +102,7 @@ PPQN                  = 24      # MIDI-Clock: 24 Pulse pro Viertelnote
 VIRTUAL_MIDI          = "__virtual__"       # Sentinel statt Portname: eigenen
                                             #   virtuellen Port erzeugen (nur
                                             #   macOS/Linux, s. open_midi_output)
-VIRTUAL_MIDI_NAME     = "Audio2Midi Clock"  # Name des erzeugten Ports
+VIRTUAL_MIDI_NAME     = "AudioWizard Clock"  # Name des erzeugten Ports
 
 INPUT_SR              = 22050   # Wunschrate fuer den Eingangs-Modus (sounddevice)
 LOOPBACK_SR           = 48000   # Aufnahmerate fuer Loopback (Windows-Mixer ist meist 48 kHz)
@@ -342,7 +342,7 @@ BEAT_ANCHOR_EMA       = 0.3     # Glaettung des Beat-Ankers ueber die Analysen:
                                 #   1.0 = aus (jede Messung gilt sofort).
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "audio2midi.log")
+                        "audiowizard.log")
 CHORD_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "akkorde.txt")
 
