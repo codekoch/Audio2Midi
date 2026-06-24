@@ -2989,6 +2989,18 @@ def _load_audio_for_demucs(path, target_sr, channels):
     return np.ascontiguousarray(wav, dtype=np.float32)
 
 
+def load_audio_head(path, seconds):
+    """Laedt nur die ERSTEN 'seconds' Sekunden einer Audiodatei (fuer Schnelltests,
+    damit das langsame Trennen/Verarbeiten kurz bleibt). Rueckgabe
+    (array (frames, ch) float32, sr)."""
+    if sf is None:
+        raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
+    info = sf.info(path)
+    n = int(max(1.0, float(seconds)) * info.samplerate)
+    data, sr = sf.read(path, frames=n, dtype="float32", always_2d=True)
+    return np.ascontiguousarray(data, dtype=np.float32), int(sr)
+
+
 def _separate_stems_direct(path, model="htdemucs", log=None, overlap=0.1, shifts=0):
     """Trennung ueber die Low-Level-API von Demucs, mit eigenem Audio-Laden
     (librosa) statt torchaudio. Robust gegen fehlende demucs.api/torchcodec.
@@ -3202,6 +3214,95 @@ def separate_stems_array(audio, sr, model="htdemucs", log=None, overlap=0.1, shi
         _emit(log, "Schreibe Aufnahme in eine temporaere WAV-Datei …")
         sf.write(tmp, np.asarray(audio, dtype=np.float32), int(sr), subtype='PCM_16')
         return separate_stems(tmp, model, log=log, overlap=overlap, shifts=shifts)
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+# --- "Ultra"-Trennung per RoFormer-Kaskade (optional, SOTA 2026) -----------
+# Hintergrund: Mel-Band-/BS-RoFormer (2026 SOTA) trennen den GESANG deutlich
+# sauberer als Demucs, liegen aber nur als 2-Stem-Modelle (Vocals/Instrumental)
+# vor. Daher Kaskade: 1) RoFormer entfernt den Gesang, 2) Demucs (htdemucs_ft)
+# trennt das VOKALFREIE Instrumental -- ohne Gesang weniger Uebersprechen in
+# Bass/Drums. Braucht das Paket 'audio-separator[cpu]' UND FFmpeg im PATH.
+ROFORMER_VOCAL_MODEL = "vocals_mel_band_roformer.ckpt"   # SDR ~12.6 (Kim. Jensen)
+
+
+def roformer_available():
+    """SOTA-RoFormer nutzbar? Braucht das Paket 'audio_separator' UND FFmpeg
+    (audio-separator ruft ffmpeg fuers Audio-Laden auf)."""
+    import importlib.util
+    import shutil
+    if importlib.util.find_spec("audio_separator") is None:
+        return False
+    return shutil.which("ffmpeg") is not None
+
+
+def separate_stems_roformer(path, log=None):
+    """'Ultra'-Trennung (Kaskade): (1) RoFormer (audio-separator) entfernt den
+    Gesang in SOTA-Qualitaet -> vocals + instrumental; (2) Demucs (htdemucs_ft +
+    Shift-Trick) trennt das vokalfreie Instrumental in drums/bass/other. Rueckgabe
+    (dict {name:(frames,ch)}, sr). SEHR langsam auf CPU. Braucht
+    'audio-separator[cpu]' + FFmpeg."""
+    import logging
+    import tempfile
+    import shutil as _sh
+    if not roformer_available():
+        raise RuntimeError("Ultra/RoFormer braucht 'pip install audio-separator[cpu]' "
+                           "UND FFmpeg (ffmpeg im PATH).")
+    from audio_separator.separator import Separator
+    workdir = tempfile.mkdtemp(prefix="a2m_rofo_")
+    try:
+        _emit(log, "RoFormer: entferne Gesang (SOTA) … beim ersten Mal wird das "
+                   "Modell geladen; auf CPU dauert das DEUTLICH laenger.")
+        sep = Separator(output_dir=workdir, log_level=logging.ERROR)
+        sep.load_model(model_filename=ROFORMER_VOCAL_MODEL)
+        outs = sep.separate(path)
+        # audio-separator haengt den Stem-Tag in KLAMMERN an: "(Vocals)" vs
+        # "(Instrumental)"/"(Other)". Nur am Klammer-Tag matchen -- der Modellname
+        # ("vocals_mel_band_roformer") enthaelt sonst auch "vocals".
+        voc_f, others = None, []
+        for f in outs:
+            fp = f if os.path.isabs(f) else os.path.join(workdir, f)
+            if "(vocal" in os.path.basename(fp).lower():
+                voc_f = fp
+            else:
+                others.append(fp)
+        inst_f = others[0] if others else None
+        if inst_f is None or voc_f is None:
+            raise RuntimeError(f"RoFormer-Ausgabe unklar: {outs}")
+        vocals, vsr = sf.read(voc_f, always_2d=True)
+        _emit(log, "RoFormer fertig. Demucs trennt das Instrumental "
+                   "(drums/bass/rest) …")
+        inst_stems, isr = separate_stems(inst_f, model="htdemucs_ft", log=log,
+                                         overlap=0.25, shifts=1)
+        out = dict(inst_stems)                  # drums/bass/other von Demucs
+        vocals = np.asarray(vocals, dtype=np.float32)
+        if int(vsr) != int(isr):                # RoFormer-Gesang aufs Demucs-sr bringen
+            vocals = librosa.resample(vocals.T, orig_sr=int(vsr),
+                                      target_sr=int(isr)).T
+        out["vocals"] = np.ascontiguousarray(vocals, dtype=np.float32)
+        n = min(len(np.asarray(a)) for a in out.values())   # Laengen angleichen
+        out = {k: np.ascontiguousarray(np.asarray(v)[:n], dtype=np.float32)
+               for k, v in out.items()}
+        _emit(log, "Ultra-Trennung fertig (RoFormer-Gesang + Demucs-Instrumental).")
+        return out, int(isr)
+    finally:
+        _sh.rmtree(workdir, ignore_errors=True)
+
+
+def separate_stems_roformer_array(audio, sr, log=None):
+    """Wie separate_stems_roformer, aber fuer ein In-Memory-Signal (Temp-WAV)."""
+    import tempfile
+    if sf is None:
+        raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        sf.write(tmp, np.asarray(audio, dtype=np.float32), int(sr), subtype="PCM_16")
+        return separate_stems_roformer(tmp, log=log)
     finally:
         try:
             os.remove(tmp)

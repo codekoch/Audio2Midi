@@ -14,6 +14,11 @@ soundcard; sys_platform == 'win32'
 # Optional: lokale KI-Stem-Trennung (Drums/Bass/Gesang/Rest). Zieht PyTorch und
 # ist gross -- daher NICHT standardmaessig installiert. Bei Bedarf separat:
 #   pip install demucs
+# Optional: Stem-Qualitaet "Ultra" (2026-SOTA, Mel-Band-RoFormer-Kaskade fuer
+# weniger Uebersprechen, v. a. Bass). Braucht das Paket UND FFmpeg im PATH;
+# ohne GPU sehr langsam:
+#   pip install "audio-separator[cpu]"
+#   + FFmpeg installieren (Windows: winget install ffmpeg)
 # Optional: Song-Sheet (Gesangstext + Akkorde). Braucht zusaetzlich eine lokale
 # Whisper-KI fuer die Transkription (laedt beim ersten Mal ein Sprachmodell):
 #   pip install faster-whisper

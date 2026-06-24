@@ -2661,8 +2661,14 @@ class DisplayApp:
                      ("Groß – beste Qualität (langsam)", "large-v3")]
         # Stem-Trennqualitaet: schnell reicht furs Song-Sheet; fuer Export/MIDI
         # lohnt die volle Demucs-Qualitaet (~20 % langsamer).
+        rofo_ok = core.roformer_available()
         qual_map = [("Automatisch", "auto"), ("Hoch – für Export/MIDI", "hi"),
-                    ("Maximum – fine-tuned, kaum Übersprechen (sehr langsam)", "max"),
+                    ("Maximum – fine-tuned + Shift-Trick (langsam)", "max"),
+                    ("Maximum+ – fine-tuned + shifts 2 (sehr langsam)", "max2"),
+                    (("Ultra – RoFormer SOTA, bester Bass (extrem langsam)"
+                      if rofo_ok else
+                      "Ultra – RoFormer (pip install audio-separator[cpu])"),
+                     "ultra"),
                     ("Schnell – für Song-Sheet", "fast")]
         win = tk.Toplevel(self.root)
         win.title("Was soll passieren?")
@@ -2767,6 +2773,21 @@ class DisplayApp:
                  "exakt 2 Takte vor dem ersten Downbeat (4/4); der Auftakt liegt im "
                  "Vorlauf. Ende bleibt unverändert.", font=self.f_tiny, bg=COL_BG,
                  fg=COL_MUTED, justify="left").pack(anchor="w", pady=(2, 0))
+        # Schnelltest: nur die ersten N s verarbeiten -> kurze Wartezeit beim
+        # Antesten (v. a. fuer die sehr langsame „Ultra"-Qualitaet).
+        qtf = tk.Frame(body, bg=COL_BG)
+        qtf.pack(anchor="w", fill="x", pady=(8, 0))
+        v_qt = tk.BooleanVar(value=False)
+        qt_sec = tk.StringVar(value="30")
+        tk.Checkbutton(qtf, text="Schnelltest – nur die ersten", variable=v_qt,
+                       font=self.f_small, bg=COL_BG, fg=COL_FG, selectcolor=COL_SURFACE,
+                       activebackground=COL_BG, activeforeground=COL_FG, bd=0,
+                       highlightthickness=0).pack(side="left")
+        tk.Entry(qtf, textvariable=qt_sec, width=4, font=self.f_small, bg=COL_SURFACE,
+                 fg=COL_FG, insertbackground=COL_FG, bd=0, highlightthickness=0,
+                 justify="center").pack(side="left", padx=4)
+        tk.Label(qtf, text="Sekunden verarbeiten (Qualität schnell antesten)",
+                 font=self.f_small, bg=COL_BG, fg=COL_MUTED).pack(side="left")
         result = {}
 
         def _ok():
@@ -2791,8 +2812,12 @@ class DisplayApp:
             # "Automatisch": hohe Trennqualitaet, wenn die Stems als Audio/MIDI
             # genutzt werden (Export/Abspielen/Stems-MIDI) -- sonst schnell.
             # "Maximum": fine-tuned Modell + Shift-Trick (kaum Uebersprechen, lahm).
-            sep_model, shifts = "htdemucs", 0
-            if qual == "max":
+            sep_model, shifts, sep_backend = "htdemucs", 0, "demucs"
+            if qual == "ultra":          # RoFormer (SOTA, bester Bass; sehr langsam)
+                overlap, sep_backend = 0.25, "roformer"
+            elif qual == "max2":         # fine-tuned + doppelter Shift-Trick
+                overlap, sep_model, shifts = 0.25, "htdemucs_ft", 2
+            elif qual == "max":
                 overlap, sep_model, shifts = 0.25, "htdemucs_ft", 1
             elif qual == "hi":
                 overlap = 0.25
@@ -2801,12 +2826,18 @@ class DisplayApp:
             else:
                 overlap = (0.25 if (v_export.get() or v_play.get()
                                     or v_stemmidi.get()) else 0.1)
+            qts = 0
+            if v_qt.get():
+                try:
+                    qts = int(max(5.0, float(qt_sec.get().replace(",", "."))))
+                except ValueError:
+                    qts = 30
             result.update(clock=bool(v_clock.get()) if allow_clock else False,
                           export=bool(v_export.get()), sheet=bool(v_sheet.get()),
                           play=bool(v_play.get()), stemmidi=bool(v_stemmidi.get()),
-                          barcut=bool(v_barcut.get()),
+                          barcut=bool(v_barcut.get()), quicktest_s=qts,
                           out_dir=out_dir, overlap=overlap, shifts=shifts,
-                          sep_model=sep_model,
+                          sep_model=sep_model, sep_backend=sep_backend,
                           language=None if lang == "auto" else lang, model=model)
             win.destroy()
 
@@ -2854,6 +2885,18 @@ class DisplayApp:
             out = {"actions": actions, "title": title, "sheet": None,
                    "stems": None, "stem_sr": None, "export_paths": None,
                    "midi_notes": None}
+            qt = int(actions.get("quicktest_s", 0) or 0)
+            if qt > 0:                             # Schnelltest: nur ersten Ausschnitt
+                self._stem_log(log, f"Schnelltest: nur die ersten {qt} s.")
+                try:
+                    if isinstance(source, tuple):
+                        _t, rec, srr = source
+                        source = ("array", np.asarray(rec)[:int(qt * srr)], srr)
+                    else:
+                        data, fsr = core.load_audio_head(source, qt)
+                        source = ("array", data, fsr)
+                except Exception as ex:
+                    self._stem_log(log, f"Schnelltest übersprungen: {ex}")
             ov = float(actions.get("overlap", 0.1))
             sh = int(actions.get("shifts", 0))
             sm = actions.get("sep_model", "htdemucs")
@@ -2862,10 +2905,17 @@ class DisplayApp:
                      + int(bool(actions.get("stemmidi"))))
             step = 0
             self._stem_progress(log, step, total, "Stems trennen")
-            qtag = ("[Maximum: htdemucs_ft + Shift-Trick]" if sh > 0
+            backend = actions.get("sep_backend", "demucs")
+            qtag = ("[Ultra: RoFormer SOTA]" if backend == "roformer"
+                    else "[Maximum: htdemucs_ft + Shift-Trick x%d]" % sh if sh > 0
                     else "[hohe Qualität]" if ov >= 0.2 else "[schnell]")
             self._stem_log(log, "== Stems trennen (einmalig) == " + qtag)
-            if isinstance(source, tuple):            # ('array', rec, sr)
+            if backend == "roformer" and isinstance(source, tuple):
+                _tag, rec, srr = source
+                stems, ssr = core.separate_stems_roformer_array(rec, srr, log=cb)
+            elif backend == "roformer":
+                stems, ssr = core.separate_stems_roformer(source, log=cb)
+            elif isinstance(source, tuple):          # ('array', rec, sr)
                 _tag, rec, srr = source
                 stems, ssr = core.separate_stems_array(rec, srr, model=sm, log=cb,
                                                        overlap=ov, shifts=sh)

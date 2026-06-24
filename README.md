@@ -158,7 +158,17 @@ siehe [Webversion](#webversion-browser).
   geringste **Übersprechung** zwischen den Spuren gibt es zusätzlich **„Maximum"**:
   das nutzt das **fine-tuned Modell `htdemucs_ft`** plus den **Shift-Trick**
   (Test-Time-Augmentation) – hörbar saubere Bass-/Drum-Stems, aber **~4–8× langsamer**
-  und beim ersten Mal **~1 GB Modell-Download**. Für die
+  und beim ersten Mal **~1 GB Modell-Download**. **„Maximum+"** verdoppelt den
+  Shift-Trick (`shifts=2`) – noch etwas sauberer, nochmal deutlich langsamer.
+  **„Ultra"** nutzt die **2026-SOTA-Modelle (Mel-Band-RoFormer)** als **Kaskade**:
+  RoFormer entfernt zuerst den Gesang in Top-Qualität, dann trennt Demucs das
+  **vokalfreie** Instrumental in Drums/Bass/Rest (am deutlichsten **sauberere
+  Vocals**; Bass/Drums dadurch moderat besser). Ultra ist **optional** und braucht
+  `pip install "audio-separator[cpu]"` **plus FFmpeg** im PATH; ohne GPU ist es
+  **extrem langsam** (auf CPU eher für Einzel-Tracks/Übernacht-Render). Zum
+  **schnellen Antesten** einer Stufe gibt es die Dialog-Option **„Schnelltest – nur
+  die ersten N Sekunden verarbeiten"**: die Trennung läuft dann nur über einen kurzen
+  Ausschnitt (z. B. 30 s), sodass man die Qualität in Minuten hört. Für die
   **Sample-Nutzung** gibt es die Export-Option **„Stems auf Takt schneiden"**: dann
   werden alle exportierten Stems **gemeinsam** so geschnitten, dass der Start
   **exakt 2 Takte vor dem ersten Downbeat** liegt (4/4) – ein **Auftakt** liegt damit
