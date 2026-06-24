@@ -144,7 +144,9 @@ siehe [Webversion](#webversion-browser).
   Tempo-Sync kombinieren). Außerhalb des DJ-Modus läuft alles über **einen
   gemeinsamen Dialog „Was soll passieren?"**: nach dem **Laden einer Datei** oder
   nach einer **Aufnahme** lassen sich **MIDI-Clock-Ausgabe, Stem-Export, Stems
-  abspielen** (zusammen/getrennt, im **Stem-Player** mit Pegel-Fadern je Spur),
+  abspielen** (zusammen/getrennt, im **Stem-Player** mit Pegel-Fadern je Spur,
+  **⏮ Anfang** zum Neustart und **„💾 Stems speichern…"** – einzelne oder alle
+  Spuren als WAV, optional gleich **auf Takt geschnitten**, siehe unten),
   **Bass → MIDI** (siehe unten) und
   **Song-Sheet** beliebig **kombinieren** – die teure KI-Trennung läuft dabei nur
   **einmal** für alle gewählten Aktionen, und eine Aufnahme muss nicht erst als
@@ -153,6 +155,10 @@ siehe [Webversion](#webversion-browser).
   (Text/Akkorde sind robust gegen kleine Trennartefakte), und in **voller
   Qualität**, sobald die Stems als **Audio exportiert/abgespielt** oder zu **MIDI**
   gewandelt werden; man kann auch fest „Hoch" oder „Schnell" erzwingen. Für die
+  geringste **Übersprechung** zwischen den Spuren gibt es zusätzlich **„Maximum"**:
+  das nutzt das **fine-tuned Modell `htdemucs_ft`** plus den **Shift-Trick**
+  (Test-Time-Augmentation) – hörbar saubere Bass-/Drum-Stems, aber **~4–8× langsamer**
+  und beim ersten Mal **~1 GB Modell-Download**. Für die
   **Sample-Nutzung** gibt es die Export-Option **„Stems auf Takt schneiden"**: dann
   werden alle exportierten Stems **gemeinsam** so geschnitten, dass der Start
   **exakt 2 Takte vor dem ersten Downbeat** liegt (4/4) – ein **Auftakt** liegt damit

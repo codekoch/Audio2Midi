@@ -2989,12 +2989,14 @@ def _load_audio_for_demucs(path, target_sr, channels):
     return np.ascontiguousarray(wav, dtype=np.float32)
 
 
-def _separate_stems_direct(path, model="htdemucs", log=None, overlap=0.1):
+def _separate_stems_direct(path, model="htdemucs", log=None, overlap=0.1, shifts=0):
     """Trennung ueber die Low-Level-API von Demucs, mit eigenem Audio-Laden
     (librosa) statt torchaudio. Robust gegen fehlende demucs.api/torchcodec.
     'overlap' steuert Geschwindigkeit/Qualitaet: 0.1 = schnell (gut genug fuer
     Transkription/Akkorde), 0.25 = Demucs-Standard (volle Qualitaet, ~20 %
-    langsamer -- fuer Stem-Export und Bass->MIDI sinnvoll)."""
+    langsamer -- fuer Stem-Export und Bass->MIDI sinnvoll). 'shifts' = Test-Time-
+    Augmentation (Demucs' Shift-Trick): 0 = aus, N = N zufaellige Verschiebungen
+    mitteln -> weniger Uebersprechen/Artefakte, aber N-fach langsamer."""
     import torch
     from demucs.apply import apply_model
     m = _get_model_direct(model, log=log)
@@ -3007,9 +3009,10 @@ def _separate_stems_direct(path, model="htdemucs", log=None, overlap=0.1):
     _emit(log, f"Trennung laeuft (direkt, {dev.upper()}) … "
                "das kann je nach Laenge und CPU einige Minuten dauern.")
     with torch.no_grad():
-        # overlap 0.1 (schnell) vs. 0.25 (Demucs-Standard, volle Qualitaet).
+        # overlap 0.1 (schnell) vs. 0.25 (Demucs-Standard); shifts>0 = Shift-Trick
+        # (deutlich weniger Uebersprechen, aber N-fach langsamer).
         sources = apply_model(m, wt[None], device=dev, progress=False,
-                              overlap=float(overlap))[0]
+                              overlap=float(overlap), shifts=int(shifts))[0]
     sources = sources * ref.std() + ref.mean()
     out = {}
     for name, src in zip(m.sources, sources):
@@ -3055,12 +3058,14 @@ def _separate_stems_cli(path, model="htdemucs", log=None):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def separate_stems(path, model="htdemucs", log=None, overlap=0.1):
+def separate_stems(path, model="htdemucs", log=None, overlap=0.1, shifts=0):
     """Trennt eine Audiodatei lokal per Demucs. Rueckgabe (dict {name:
     (frames, ch) float32}, sr). OFFLINE und langsam (KI-Modell).
 
     'overlap': 0.1 = schnell (Default, fuer Song-Sheet ausreichend), 0.25 =
-    Demucs-Standard/volle Qualitaet (fuer Stem-Export oder Bass->MIDI).
+    Demucs-Standard/volle Qualitaet (fuer Stem-Export oder Bass->MIDI). 'shifts'
+    = Shift-Trick (0 aus). Maximum-Qualitaet = Modell 'htdemucs_ft' (fine-tuned)
+    + shifts>0: deutlich weniger Uebersprechen, aber ~4-8x langsamer.
 
     Drei Wege, vom robustesten zum ausweichendsten:
       1) direkt (eigenes Audio-Laden per librosa, ohne torchaudio) -- laeuft
@@ -3074,8 +3079,8 @@ def separate_stems(path, model="htdemucs", log=None, overlap=0.1):
                       ("CLI", _separate_stems_cli)):
         try:
             if label == "direkt":
-                return fn(path, model, log=log, overlap=overlap)
-            return fn(path, model, log=log)    # Ausweichwege: ohne overlap
+                return fn(path, model, log=log, overlap=overlap, shifts=shifts)
+            return fn(path, model, log=log)    # Ausweichwege: ohne overlap/shifts
         except Exception as e:
             errors.append(f"{label}: {e}")
             _emit(log, f"Weg '{label}' fehlgeschlagen ({e}).")
@@ -3185,7 +3190,7 @@ def separate_stems_to_files(path, out_dir, model="htdemucs", base=None, log=None
     return write_stems_to_files(stems, sr, out_dir, base=base, log=log)
 
 
-def separate_stems_array(audio, sr, model="htdemucs", log=None, overlap=0.1):
+def separate_stems_array(audio, sr, model="htdemucs", log=None, overlap=0.1, shifts=0):
     """Wie separate_stems, aber fuer ein In-Memory-Signal (z. B. eine Aufnahme):
     schreibt eine Temp-WAV und trennt diese. Rueckgabe (dict, sr)."""
     if sf is None:
@@ -3196,7 +3201,7 @@ def separate_stems_array(audio, sr, model="htdemucs", log=None, overlap=0.1):
     try:
         _emit(log, "Schreibe Aufnahme in eine temporaere WAV-Datei …")
         sf.write(tmp, np.asarray(audio, dtype=np.float32), int(sr), subtype='PCM_16')
-        return separate_stems(tmp, model, log=log, overlap=overlap)
+        return separate_stems(tmp, model, log=log, overlap=overlap, shifts=shifts)
     finally:
         try:
             os.remove(tmp)

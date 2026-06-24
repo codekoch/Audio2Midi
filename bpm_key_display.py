@@ -1314,11 +1314,24 @@ class DisplayApp:
                             activeforeground=COL_FG, bd=0, padx=20, pady=6,
                             highlightthickness=0, cursor="hand2")
         playbtn.pack(side="left", padx=(0, 12))
+
+        def _restart():
+            player.seek(0.0)
+            player.play()
+            playbtn.config(text="⏸")
+        self._small_button(ctl, "⏮ Anfang", _restart).pack(side="left", padx=(0, 12))
         poslbl = tk.Label(ctl, text="0:00 / 0:00", font=self.f_small, bg=COL_BG,
                           fg=COL_MUTED)
         poslbl.pack(side="left")
         playbtn.config(command=lambda: playbtn.config(
             text="⏸" if player.toggle() else "▶"))
+
+        # --- Stems speichern (einzeln/alle, optional auf Takt geschnitten) ---
+        savef = tk.Frame(win, bg=COL_BG)
+        savef.pack(pady=(0, 6))
+        self._small_button(
+            savef, "💾 Stems speichern…",
+            lambda: self._save_stems_dialog(win, stems_dict, sr, bpm)).pack()
 
         # --- Stems → MIDI (Basic Pitch): mehrere Spuren synchron senden ---
         midi_player = {"obj": None, "port": None}
@@ -1552,6 +1565,86 @@ class DisplayApp:
         self._small_button(win, "Schließen", _close).pack(pady=8)
         _upd()
         return player
+
+    def _save_stems_dialog(self, parent_win, stems_dict, sr, bpm=0.0):
+        """Dialog: welche Stems speichern (einzeln/alle) + optional „auf Takt
+        schneiden" (2 Takte Vorlauf, Sample). Jede gewaehlte Spur wird eine eigene
+        WAV (`<Name>_<stem>.wav`) im gewaehlten Ordner."""
+        names = ([n for n in core.STEM_NAMES if n in stems_dict]
+                 + [n for n in stems_dict if n not in core.STEM_NAMES])
+        if not names:
+            messagebox.showinfo("Stems speichern", "Keine Stems vorhanden.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Stems speichern")
+        win.configure(bg=COL_BG)
+        win.transient(parent_win)
+        tk.Label(win, text="Stems speichern", font=self.f_h1, bg=COL_BG,
+                 fg=COL_FG).pack(pady=(12, 2))
+        tk.Label(win, text="Welche Spuren? Jede wird eine eigene WAV.",
+                 font=self.f_tiny, bg=COL_BG, fg=COL_MUTED).pack(pady=(0, 8))
+        body = tk.Frame(win, bg=COL_BG)
+        body.pack(padx=20, pady=4)
+        sel = {}
+        for nm in names:
+            v = tk.BooleanVar(value=True)
+            sel[nm] = v
+            tk.Checkbutton(body, text=core.STEM_LABELS.get(nm, nm), variable=v,
+                           font=self.f_small, bg=COL_BG, fg=COL_FG,
+                           selectcolor=COL_SURFACE, activebackground=COL_BG,
+                           activeforeground=COL_FG, bd=0, highlightthickness=0,
+                           anchor="w", width=12).pack(anchor="w")
+        nfr = tk.Frame(win, bg=COL_BG)
+        nfr.pack(padx=20, pady=(6, 0), anchor="w")
+        tk.Label(nfr, text="Name:", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_MUTED).pack(side="left", padx=(0, 6))
+        namev = tk.StringVar(value="stems")
+        tk.Entry(nfr, textvariable=namev, width=18, font=self.f_small, bg=COL_SURFACE,
+                 fg=COL_FG, insertbackground=COL_FG, bd=0,
+                 highlightthickness=0).pack(side="left")
+        cutv = tk.BooleanVar(value=False)
+        tk.Checkbutton(win, text="Auf Takt schneiden (Sample, 2 Takte Vorlauf – "
+                       "Tempo wird automatisch erkannt)", variable=cutv,
+                       font=self.f_small, bg=COL_BG, fg=COL_FG,
+                       selectcolor=COL_SURFACE, activebackground=COL_BG,
+                       activeforeground=COL_FG, bd=0, highlightthickness=0,
+                       anchor="w").pack(anchor="w", padx=20, pady=(8, 0))
+        status = tk.Label(win, text="", font=self.f_tiny, bg=COL_BG, fg=COL_MUTED)
+        status.pack(pady=(6, 2))
+
+        def _do_save():
+            chosen = [nm for nm in names if sel[nm].get()]
+            if not chosen:
+                status.config(text="Keine Spur gewählt.")
+                return
+            cfg = load_config()
+            out_dir = filedialog.askdirectory(
+                title="Zielordner für die Stems",
+                initialdir=cfg.get("last_save_dir") or "")
+            if not out_dir:
+                return
+            base = core.sanitize_filename(namev.get() or "stems")
+            do_cut = bool(cutv.get())
+            status.config(text="speichere …")
+
+            def _work():
+                try:
+                    src = stems_dict
+                    if do_cut:
+                        src = core.bar_aligned_stems(stems_dict, sr)  # alle gemeinsam
+                    to_write = {nm: src[nm] for nm in chosen if nm in src}
+                    paths = core.write_stems_to_files(to_write, sr, out_dir, base=base)
+                    save_config({**load_config(), "last_save_dir": out_dir})
+                    self.root.after(0, lambda: status.config(
+                        text=f"{len(paths)} Datei(en) gespeichert."))
+                except Exception as ex:
+                    self.root.after(0, lambda e=ex: status.config(
+                        text=f"Fehler: {e}"))
+            threading.Thread(target=_work, daemon=True).start()
+
+        self._small_button(win, "Speichern…", _do_save).pack(pady=(2, 2))
+        self._small_button(win, "Schließen", win.destroy).pack(pady=(0, 10))
+        win._a2m_save_vars = (sel, cutv, namev)   # Tk-Variablen vor GC schuetzen
 
     def _drum_settings(self):
         """Schlagzeug-Zuordnung {key:{'on','note'}} + Empfindlichkeit (0..1) aus
@@ -2569,6 +2662,7 @@ class DisplayApp:
         # Stem-Trennqualitaet: schnell reicht furs Song-Sheet; fuer Export/MIDI
         # lohnt die volle Demucs-Qualitaet (~20 % langsamer).
         qual_map = [("Automatisch", "auto"), ("Hoch – für Export/MIDI", "hi"),
+                    ("Maximum – fine-tuned, kaum Übersprechen (sehr langsam)", "max"),
                     ("Schnell – für Song-Sheet", "fast")]
         win = tk.Toplevel(self.root)
         win.title("Was soll passieren?")
@@ -2696,17 +2790,23 @@ class DisplayApp:
             save_config(new_cfg)
             # "Automatisch": hohe Trennqualitaet, wenn die Stems als Audio/MIDI
             # genutzt werden (Export/Abspielen/Stems-MIDI) -- sonst schnell.
-            if qual == "hi":
-                hi = True
+            # "Maximum": fine-tuned Modell + Shift-Trick (kaum Uebersprechen, lahm).
+            sep_model, shifts = "htdemucs", 0
+            if qual == "max":
+                overlap, sep_model, shifts = 0.25, "htdemucs_ft", 1
+            elif qual == "hi":
+                overlap = 0.25
             elif qual == "fast":
-                hi = False
+                overlap = 0.1
             else:
-                hi = bool(v_export.get() or v_play.get() or v_stemmidi.get())
+                overlap = (0.25 if (v_export.get() or v_play.get()
+                                    or v_stemmidi.get()) else 0.1)
             result.update(clock=bool(v_clock.get()) if allow_clock else False,
                           export=bool(v_export.get()), sheet=bool(v_sheet.get()),
                           play=bool(v_play.get()), stemmidi=bool(v_stemmidi.get()),
                           barcut=bool(v_barcut.get()),
-                          out_dir=out_dir, overlap=0.25 if hi else 0.1,
+                          out_dir=out_dir, overlap=overlap, shifts=shifts,
+                          sep_model=sep_model,
                           language=None if lang == "auto" else lang, model=model)
             win.destroy()
 
@@ -2755,18 +2855,23 @@ class DisplayApp:
                    "stems": None, "stem_sr": None, "export_paths": None,
                    "midi_notes": None}
             ov = float(actions.get("overlap", 0.1))
+            sh = int(actions.get("shifts", 0))
+            sm = actions.get("sep_model", "htdemucs")
             # Phasen fuer den Fortschrittsbalken zaehlen (Trennen ist immer dabei)
             total = (1 + int(bool(actions["export"])) + int(bool(actions["sheet"]))
                      + int(bool(actions.get("stemmidi"))))
             step = 0
             self._stem_progress(log, step, total, "Stems trennen")
-            self._stem_log(log, "== Stems trennen (einmalig) == "
-                           + ("[hohe Qualität]" if ov >= 0.2 else "[schnell]"))
+            qtag = ("[Maximum: htdemucs_ft + Shift-Trick]" if sh > 0
+                    else "[hohe Qualität]" if ov >= 0.2 else "[schnell]")
+            self._stem_log(log, "== Stems trennen (einmalig) == " + qtag)
             if isinstance(source, tuple):            # ('array', rec, sr)
                 _tag, rec, srr = source
-                stems, ssr = core.separate_stems_array(rec, srr, log=cb, overlap=ov)
+                stems, ssr = core.separate_stems_array(rec, srr, model=sm, log=cb,
+                                                       overlap=ov, shifts=sh)
             else:
-                stems, ssr = core.separate_stems(source, log=cb, overlap=ov)
+                stems, ssr = core.separate_stems(source, model=sm, log=cb,
+                                                 overlap=ov, shifts=sh)
             step += 1                              # Trennung fertig
             if actions["export"]:
                 self._stem_progress(log, step, total, "Stems exportieren")
