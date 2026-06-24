@@ -1523,7 +1523,7 @@ class DisplayApp:
                     row=brow, column=1, columnspan=2, sticky="w", pady=(2, 6))
                 self._small_button(
                     midf, "Deluge-Song…",
-                    lambda: self._save_deluge(mp, bpm)).grid(
+                    lambda: self._save_deluge(mp, bpm, stems_dict, sr)).grid(
                         row=brow + 1, column=0, columnspan=3, sticky="w",
                         padx=6, pady=(0, 6))
             except Exception as e:
@@ -1572,81 +1572,95 @@ class DisplayApp:
         _upd()
         return player
 
-    def _save_deluge(self, mp, bpm):
-        """Schreibt eine Synthstrom-Deluge-Songdatei (.XML) aus den AKTIVEN MIDI-
-        Spuren: tonale Stems -> interne Synths, Schlagzeug -> Kit. Variante (ganzer
-        Song / Takt-Loops) waehlbar. Braucht das 808-Factory-Kit auf der SD-Karte."""
+    def _save_deluge(self, mp, bpm, stems_dict, sr):
+        """Deluge-BUNDLE aus den aktiven MIDI-Spuren UND den Stems: richtet beide mit
+        DEMSELBEN Downbeat aus (auf der Deluge garantiert synchron, Groove-Downbeat
+        auf dem Takt-Raster). Der Downbeat (erster klarer Drum-Einsatz) wird
+        automatisch erkannt und ist per ◀/▶ um Beats nachjustierbar. Schreibt die
+        ausgerichteten Stem-WAVs + die XML. Drums = 808-Kit (Samples auf SD)."""
         tracks = mp.enabled_tracks()             # [(name, notes, channel)]
         if not tracks:
             messagebox.showinfo("Deluge-Song",
                                 "Keine aktive Spur – bitte Häkchen setzen.")
             return
+        dref = stems_dict.get("drums")
+        try:
+            t_db0 = core.drums_downbeat_sec(dref, sr) if dref is not None else 0.0
+        except Exception:
+            t_db0 = 0.0
+        beat = 60.0 / (bpm if bpm and bpm > 0 else 120.0)
         win = tk.Toplevel(self.root)
-        win.title("Deluge-Song erstellen")
+        win.title("Deluge-Song (Bundle)")
         win.configure(bg=COL_BG)
         win.transient(self.root)
-        tk.Label(win, text="Deluge-Song erstellen", font=self.f_h1, bg=COL_BG,
+        tk.Label(win, text="Deluge-Song (Stems + MIDI)", font=self.f_h1, bg=COL_BG,
                  fg=COL_FG).pack(pady=(12, 2))
         active = ", ".join(core.STEM_LABELS.get(n, n) for n, _x, _c in tracks)
-        tk.Label(win, text=f"Aktive Spuren: {active}", font=self.f_tiny, bg=COL_BG,
+        tk.Label(win, text=f"Spuren: {active}", font=self.f_tiny, bg=COL_BG,
                  fg=COL_MUTED).pack(pady=(0, 8))
-        mode = tk.StringVar(value="whole")
-        barsv = tk.StringVar(value="2")
-        fr = tk.Frame(win, bg=COL_BG)
-        fr.pack(padx=20, pady=2, anchor="w")
+        dbv = {"t": float(t_db0)}                 # Downbeat-Zeit (nachjustierbar)
+        dbr = tk.Frame(win, bg=COL_BG)
+        dbr.pack(padx=20, pady=2, anchor="w")
+        tk.Label(dbr, text="Downbeat:", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_ACCENT).pack(side="left", padx=(0, 6))
+        dblbl = tk.Label(dbr, text=f"{dbv['t']:.3f} s", font=self.f_small, bg=COL_BG,
+                         fg=COL_FG, width=9)
 
-        def _rb(parent, text, val):
-            return tk.Radiobutton(parent, text=text, variable=mode, value=val,
-                                  font=self.f_small, bg=COL_BG, fg=COL_FG,
-                                  selectcolor=COL_SURFACE, activebackground=COL_BG,
-                                  activeforeground=COL_FG, bd=0, highlightthickness=0,
-                                  anchor="w")
-        _rb(fr, "Ganzer Song – ein Clip je Spur", "whole").pack(anchor="w")
-        lr = tk.Frame(fr, bg=COL_BG)
-        lr.pack(anchor="w")
-        _rb(lr, "Takt-Loops –", "loops").pack(side="left")
-        tk.Entry(lr, textvariable=barsv, width=3, font=self.f_small, bg=COL_SURFACE,
+        def _nudge(d):
+            dbv["t"] = max(0.0, dbv["t"] + d * beat)
+            dblbl.config(text=f"{dbv['t']:.3f} s")
+        self._small_button(dbr, "◀ Beat", lambda: _nudge(-1)).pack(side="left")
+        dblbl.pack(side="left", padx=4)
+        self._small_button(dbr, "Beat ▶", lambda: _nudge(+1)).pack(side="left")
+        lr = tk.Frame(win, bg=COL_BG)
+        lr.pack(padx=20, pady=(4, 0), anchor="w")
+        leadv = tk.StringVar(value="2")
+        tk.Label(lr, text="Vorlauf:", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_ACCENT).pack(side="left", padx=(0, 6))
+        tk.Entry(lr, textvariable=leadv, width=3, font=self.f_small, bg=COL_SURFACE,
                  fg=COL_FG, insertbackground=COL_FG, bd=0, highlightthickness=0,
-                 justify="center").pack(side="left", padx=4)
-        tk.Label(lr, text="Takte je Clip (mehrere Clips zum Arrangieren)",
-                 font=self.f_tiny, bg=COL_BG, fg=COL_MUTED).pack(side="left")
-        status = tk.Label(win, text="", font=self.f_tiny, bg=COL_BG, fg=COL_MUTED)
+                 justify="center").pack(side="left")
+        tk.Label(lr, text="Takte vor dem Downbeat (Auftakt liegt im Vorlauf)",
+                 font=self.f_tiny, bg=COL_BG, fg=COL_MUTED).pack(side="left", padx=4)
+        status = tk.Label(win, text="", font=self.f_tiny, bg=COL_BG, fg=COL_MUTED,
+                          wraplength=440, justify="left")
         status.pack(pady=(8, 2))
 
         def _do():
-            label = {"bass": "Bass", "other": "Rest", "vocals": "Vocals"}
-            synth_tracks, drum_track = [], None
-            for n, notes, _c in tracks:
-                if n == "drums":
-                    drum_track = {"notes": list(notes)}
-                else:
-                    synth_tracks.append({"name": label.get(n, n), "notes": list(notes)})
-            bpc = 0
-            if mode.get() == "loops":
-                try:
-                    bpc = max(1, int(float(barsv.get().replace(",", "."))))
-                except ValueError:
-                    bpc = 2
+            midi = {n: list(notes) for n, notes, _c in tracks}
+            instruments = list(midi.keys())
+            try:
+                lead = max(0, int(float(leadv.get().replace(",", "."))))
+            except ValueError:
+                lead = 2
             cfg = load_config()
             p = filedialog.asksaveasfilename(
-                title="Deluge-Song speichern", defaultextension=".XML",
-                initialfile="AudioWizard.XML",
+                title="Deluge-Bundle speichern (.XML; Stems daneben)",
+                defaultextension=".XML", initialfile="AudioWizard.XML",
                 initialdir=cfg.get("last_save_dir") or "",
                 filetypes=[("Deluge-Song", "*.XML"), ("Alle", "*.*")])
             if not p:
                 return
-            try:
-                deluge.write_deluge_song(p, bpm or 120.0, synth_tracks=synth_tracks,
-                                         drum_track=drum_track, bars_per_clip=bpc)
-                save_config({**cfg, "last_save_dir": os.path.dirname(p)})
-                status.config(text=f"Gespeichert: {os.path.basename(p)} – in den "
-                                   "SONGS-Ordner der SD-Karte kopieren.")
-            except Exception as ex:
-                status.config(text=f"Fehler: {ex}")
+            status.config(text="schreibe Bundle …")
 
-        self._small_button(win, "Speichern…", _do).pack(pady=(2, 2))
+            def _work():
+                try:
+                    xmlp, wavs = deluge.write_deluge_bundle(
+                        p, stems_dict, sr, midi, bpm or 120.0, dbv["t"],
+                        lead_bars=lead, instruments=instruments)
+                    save_config({**load_config(),
+                                 "last_save_dir": os.path.dirname(p)})
+                    msg = (f"Gespeichert: {os.path.basename(xmlp)} + {len(wavs)} "
+                           "Stems. XML → SONGS/, Stem-WAVs → SAMPLES/AudioWizard/ "
+                           "auf der SD-Karte.")
+                    self.root.after(0, lambda: status.config(text=msg))
+                except Exception as ex:
+                    self.root.after(0, lambda e=ex: status.config(text=f"Fehler: {e}"))
+            threading.Thread(target=_work, daemon=True).start()
+
+        self._small_button(win, "Bundle speichern…", _do).pack(pady=(2, 2))
         self._small_button(win, "Schließen", win.destroy).pack(pady=(0, 10))
-        win._a2m_deluge = (mode, barsv)          # Tk-Variablen vor GC schuetzen
+        win._a2m_deluge = (dblbl, leadv)          # Tk-Variablen vor GC schuetzen
 
     def _save_stems_dialog(self, parent_win, stems_dict, sr, bpm=0.0):
         """Dialog: welche Stems speichern (einzeln/alle) + optional „auf Takt
@@ -2769,6 +2783,10 @@ class DisplayApp:
         v_play = tk.BooleanVar(value=False)
         v_stemmidi = tk.BooleanVar(value=False)
         v_barcut = tk.BooleanVar(value=bool(cfg.get("stem_barcut", False)))
+        v_deluge = tk.BooleanVar(value=False)
+        dl_bars = tk.StringVar(value="2")          # Vorlauf-Takte (Lead-in)
+        dl_instr = {n: tk.BooleanVar(value=True)
+                    for n in ("bass", "drums", "other", "vocals")}
 
         def _section(text):
             tk.Label(body, text=text, font=self.f_tiny, bg=COL_BG, fg=COL_ACCENT,
@@ -2839,6 +2857,44 @@ class DisplayApp:
                        else "braucht: pip install faster-whisper",
                        command=_toggle_sheetopts)
 
+        # Deluge-Bundle + (nur dann sichtbare) Vorlauf-/Instrument-Auswahl
+        delf = tk.Frame(body, bg=COL_BG)
+        dlr1 = tk.Frame(delf, bg=COL_BG)
+        dlr1.pack(anchor="w")
+        tk.Label(dlr1, text="Vorlauf:", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_ACCENT).pack(side="left", padx=(0, 6))
+        tk.Entry(dlr1, textvariable=dl_bars, width=3, font=self.f_small,
+                 bg=COL_SURFACE, fg=COL_FG, insertbackground=COL_FG, bd=0,
+                 highlightthickness=0, justify="center").pack(side="left", padx=4)
+        tk.Label(dlr1, text="Takte vor dem Downbeat (Auftakt liegt im Vorlauf)",
+                 font=self.f_tiny, bg=COL_BG, fg=COL_MUTED).pack(side="left")
+        dlr2 = tk.Frame(delf, bg=COL_BG)
+        dlr2.pack(anchor="w", pady=(2, 0))
+        tk.Label(dlr2, text="Instrumente:", font=self.f_tiny, bg=COL_BG,
+                 fg=COL_ACCENT).pack(side="left", padx=(0, 6))
+        for nm, lbl in (("bass", "Bass"), ("drums", "Drums"),
+                        ("other", "Rest"), ("vocals", "Gesang")):
+            tk.Checkbutton(dlr2, text=lbl, variable=dl_instr[nm], font=self.f_small,
+                           bg=COL_BG, fg=COL_FG, selectcolor=COL_SURFACE,
+                           activebackground=COL_BG, activeforeground=COL_FG, bd=0,
+                           highlightthickness=0).pack(side="left", padx=(0, 4))
+        tk.Label(delf, text="Bundle: ausgerichtete Stems (WAV) + MIDI, gemeinsamer "
+                 "Downbeat auf Takt-1-Raster. Tonale Spuren brauchen basic-pitch; "
+                 "Drums = 808-Kit. Speicherort wird beim Start abgefragt; die Stem-"
+                 "WAVs danach in SAMPLES/AudioWizard/ auf die SD-Karte.",
+                 font=self.f_tiny, bg=COL_BG, fg=COL_MUTED, justify="left",
+                 wraplength=460).pack(anchor="w", pady=(2, 0))
+
+        def _toggle_delopts():
+            if v_deluge.get():
+                delf.pack(after=del_cb, anchor="w", fill="x", pady=(2, 6))
+            else:
+                delf.pack_forget()
+
+        del_cb = _cb("Deluge-Song erstellen (.XML für Synthstrom Deluge)", v_deluge,
+                     demucs_ok, "" if demucs_ok else "braucht: pip install demucs",
+                     command=_toggle_delopts)
+
         # ---- Optionen ----
         _section("Optionen")
         optf = tk.Frame(body, bg=COL_BG)
@@ -2874,7 +2930,7 @@ class DisplayApp:
 
         def _ok():
             if not (v_clock.get() or v_export.get() or v_sheet.get()
-                    or v_play.get() or v_stemmidi.get()):
+                    or v_play.get() or v_stemmidi.get() or v_deluge.get()):
                 return                       # nichts gewaehlt -> Dialog offen lassen
             out_dir = None
             if v_export.get():
@@ -2883,6 +2939,24 @@ class DisplayApp:
                     initialdir=cfg.get("last_save_dir") or "")
                 if not out_dir:
                     return                   # Abbruch der Ordnerwahl -> zurueck
+            deluge_cfg = None
+            if v_deluge.get():
+                instruments = [n for n in ("bass", "drums", "other", "vocals")
+                               if dl_instr[n].get()]
+                if not instruments:
+                    return                   # kein Instrument gewaehlt
+                dlp = filedialog.asksaveasfilename(
+                    title="Deluge-Song speichern", defaultextension=".XML",
+                    initialfile="AudioWizard.XML",
+                    initialdir=cfg.get("last_save_dir") or "",
+                    filetypes=[("Deluge-Song", "*.XML"), ("Alle", "*.*")])
+                if not dlp:
+                    return
+                try:
+                    dlead = max(0, int(float(dl_bars.get().replace(",", "."))))
+                except ValueError:
+                    dlead = 2
+                deluge_cfg = {"path": dlp, "lead": dlead, "instruments": instruments}
             lang = next(v for lbl, v in lang_map if lbl == lvar.get())
             model = next(v for lbl, v in model_map if lbl == mvar.get())
             qual = next(v for lbl, v in qual_map if lbl == qvar.get())
@@ -2890,6 +2964,8 @@ class DisplayApp:
                        "stem_quality": qual, "stem_barcut": bool(v_barcut.get())}
             if out_dir:
                 new_cfg["last_save_dir"] = out_dir
+            elif deluge_cfg:
+                new_cfg["last_save_dir"] = os.path.dirname(deluge_cfg["path"])
             save_config(new_cfg)
             # "Automatisch": hohe Trennqualitaet, wenn die Stems als Audio/MIDI
             # genutzt werden (Export/Abspielen/Stems-MIDI) -- sonst schnell.
@@ -2907,7 +2983,7 @@ class DisplayApp:
                 overlap = 0.1
             else:
                 overlap = (0.25 if (v_export.get() or v_play.get()
-                                    or v_stemmidi.get()) else 0.1)
+                                    or v_stemmidi.get() or v_deluge.get()) else 0.1)
             qts = 0
             if v_qt.get():
                 try:
@@ -2918,6 +2994,7 @@ class DisplayApp:
                           export=bool(v_export.get()), sheet=bool(v_sheet.get()),
                           play=bool(v_play.get()), stemmidi=bool(v_stemmidi.get()),
                           barcut=bool(v_barcut.get()), quicktest_s=qts,
+                          deluge=deluge_cfg,
                           out_dir=out_dir, overlap=overlap, shifts=shifts,
                           sep_model=sep_model, sep_backend=sep_backend,
                           language=None if lang == "auto" else lang, model=model)
@@ -2938,7 +3015,7 @@ class DisplayApp:
         der gewaehlten Aktionen. Stem-Trennung laeuft nur einmal fuer alle Aktionen.
         Reiner Clock-Fall (Datei) geht direkt ohne Trenn-Aufwand in den Datei-Modus."""
         needs_stems = (actions["export"] or actions["sheet"] or actions["play"]
-                       or actions.get("stemmidi"))
+                       or actions.get("stemmidi") or actions.get("deluge"))
         if not needs_stems:
             if actions.get("clock") and not isinstance(source, tuple):
                 self._begin_file_clock(source)
@@ -2956,6 +3033,7 @@ class DisplayApp:
                                 ("Song-Sheet", actions["sheet"]),
                                 ("Abspielen", actions["play"]),
                                 ("Stems-MIDI", actions.get("stemmidi")),
+                                ("Deluge-Song", actions.get("deluge")),
                                 ("MIDI-Clock", actions.get("clock"))) if on]
         self._stem_log(log, "Gewählt: " + ", ".join(bits))
         threading.Thread(target=self._material_worker,
@@ -2984,7 +3062,8 @@ class DisplayApp:
             sm = actions.get("sep_model", "htdemucs")
             # Phasen fuer den Fortschrittsbalken zaehlen (Trennen ist immer dabei)
             total = (1 + int(bool(actions["export"])) + int(bool(actions["sheet"]))
-                     + int(bool(actions.get("stemmidi"))))
+                     + int(bool(actions.get("stemmidi")))
+                     + int(bool(actions.get("deluge"))))
             step = 0
             self._stem_progress(log, step, total, "Stems trennen")
             backend = actions.get("sep_backend", "demucs")
@@ -3051,6 +3130,59 @@ class DisplayApp:
                             sensitivity=dsens, log=cb)
                     except Exception as ex:
                         self._stem_log(log, f"Schlagzeug→MIDI übersprungen: {ex}")
+            if actions.get("deluge"):
+                step += 1
+                self._stem_progress(log, step, total, "Deluge-Song")
+                self._stem_log(log, "== Deluge-Song erstellen ==")
+                dcfg = actions["deluge"]
+                dbpm = float((out.get("sheet") or {}).get("bpm", 0.0))
+                if dbpm <= 0:
+                    try:
+                        ts = stems.get("drums")
+                        if ts is None:
+                            ts = core.accompaniment_from_stems(stems)
+                        ts = ts.mean(axis=1) if getattr(ts, "ndim", 1) == 2 else ts
+                        dbpm = float(core.estimate_tempo(ts, ssr) or 0.0)
+                    except Exception:
+                        dbpm = 0.0
+                midi = out.get("midi_notes") or {}
+                min_ms = float(load_config().get("bass_min_ms", 130))
+                for nm in dcfg["instruments"]:        # MIDI je gewaehltem Instrument
+                    if midi.get(nm) is not None or stems.get(nm) is None:
+                        continue
+                    try:
+                        if nm == "drums":
+                            dmap, dsens = self._drum_settings()
+                            midi[nm] = core.drums_to_midi_notes(
+                                stems["drums"], ssr, mapping=dmap,
+                                sensitivity=dsens, log=cb)
+                        else:
+                            lo, hi = core.STEM_MIDI_RANGE.get(nm, (40.0, 2000.0))
+                            midi[nm] = core.stem_to_midi_notes(
+                                stems[nm], ssr, min_freq=lo, max_freq=hi,
+                                min_note_ms=min_ms,
+                                label=core.STEM_LABELS.get(nm, nm), log=cb)
+                    except Exception as ex:
+                        self._stem_log(log, f"{nm}→MIDI übersprungen: {ex}")
+                out["midi_notes"] = midi
+                # Downbeat (erster klarer Drum-Einsatz) -> gemeinsame Ausrichtung
+                try:
+                    dref = stems.get("drums")
+                    t_db = (core.drums_downbeat_sec(dref, ssr)
+                            if dref is not None else 0.0)
+                except Exception:
+                    t_db = 0.0
+                lead = int(dcfg.get("lead", 2))
+                try:
+                    p2, wavs = deluge.write_deluge_bundle(
+                        dcfg["path"], stems, ssr, midi, dbpm or 120.0, t_db,
+                        lead_bars=lead, instruments=dcfg["instruments"], log=cb)
+                    out["deluge_path"] = p2
+                    self._stem_log(log, f"Deluge-Bundle: {os.path.basename(p2)} + "
+                                   f"{len(wavs)} Stems – Downbeat auf Takt {lead + 1}, "
+                                   f"Stems in SAMPLES/AudioWizard/ kopieren.")
+                except Exception as ex:
+                    self._stem_log(log, f"Deluge-Bundle fehlgeschlagen: {ex}")
             # Stem-Player oeffnen, wenn Abspielen ODER Stems-MIDI gewaehlt ist
             # (die MIDI-Spuren laufen synchron zur Stem-Position mit).
             if actions["play"] or actions.get("stemmidi"):
@@ -3516,6 +3648,9 @@ class DisplayApp:
                 if out.get("sheet"):
                     self._open_sheet_window(out["sheet"], player=player)
                     msgs.append("Song-Sheet erstellt")
+                if out.get("deluge_path"):
+                    msgs.append("Deluge-Song: "
+                                + os.path.basename(out["deluge_path"]))
                 if msgs:
                     self.err_label.config(text="Fertig: " + ", ".join(msgs))
                 # MIDI-Clock (nur Datei) erst jetzt starten, nach der Verarbeitung

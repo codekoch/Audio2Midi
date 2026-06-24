@@ -235,18 +235,27 @@ siehe [Webversion](#webversion-browser).
   Komponenten auch in einer **bereits gespeicherten** Datei noch umlegen (eine
   Neuerkennung aus Audio ist dann nicht mehr möglich, nur das Verschieben der
   Tonhöhen). Reine MIDI-Ausgabe (kein Audio); braucht nur einen MIDI-Ausgang.
-- **Deluge-Songdatei erzeugen** – im Stem-Player (bei „Stems → MIDI") gibt es
-  **„Deluge-Song…"**: daraus entsteht eine **Synthstrom-Deluge-Songdatei** (`.XML`,
-  Community-Firmware c1.2.x) – jede aktive Stem-Spur wird ein **Pattern**: die
+- **Deluge-Song erzeugen (Bundle)** – direkt im Dialog **„Was soll passieren?"** als
+  eigene Aktion **„Deluge-Song erstellen"** (mit Auswahl der **Instrumente**
+  Bass/Drums/Rest/Gesang und der **Vorlauf-Takte**) **oder** im Stem-Player (bei
+  „Stems → MIDI") über **„Deluge-Song…"** (dort ist der erkannte **Downbeat per
+  ◀/▶ um Beats nachjustierbar**): daraus entsteht ein **gemeinsames Bundle** aus
+  ausgerichteten **Stem-WAVs + MIDI** als **Synthstrom-Deluge-Songdatei** (`.XML`,
+  Community-Firmware c1.2.x). Jede aktive Stem-Spur wird ein **Pattern**: die
   **melodischen** Stems (Bass/Rest/Gesang) als **interne Synth-Spuren**, das
-  **Schlagzeug** als **Kit** (Standard-808-Slots Kick/Snare/HiHat …). Wählbar:
-  **ganzer Song** (ein Clip je Spur) oder **Takt-Loops** (kurze Pattern zum
-  Arrangieren). Tempo, Notenlängen, Velocity und die Takt-Lage werden übernommen
-  (96 Ticks/Viertel). Die fertige `.XML` in den **SONGS**-Ordner der SD-Karte legen.
-  Hinweis: Das Kit referenziert das **Factory-808-Kit** – diese Samples müssen auf
-  der SD-Karte liegen, sonst lädt der Song zwar, die Drums bleiben aber stumm.
-  (Format inkl. Noten-Encoding/Tempo wurde gegen eine echte c1.2.1-Datei verifiziert
-  und auf dem Gerät getestet.)
+  **Schlagzeug** als **Kit** (Standard-808-Slots Kick/Snare/HiHat …); zusätzlich
+  läuft **jeder Stem als Audio-Spur** (`<audioTrack>`/`<audioClip>`) parallel zum
+  MIDI mit. **Stems und MIDI werden mit demselben Versatz ausgerichtet**, sodass der
+  Groove-Downbeat exakt auf dem **1. Schlag von Takt (Vorlauf+1)** im Deluge-Raster
+  liegt (Auftakte fallen in den Vorlauf); die Stems werden dazu auf **ganze Takte**
+  geschnitten, also ohne Stretch gridgenau. Tempo, Notenlängen, Velocity und die
+  Takt-Lage werden übernommen (96 Ticks/Viertel). Die fertige `.XML` in den
+  **SONGS**-Ordner legen und die daneben erzeugten **Stem-WAVs** nach
+  **`SAMPLES/AudioWizard/`** auf die SD-Karte kopieren (der Pfad steht fest in der
+  `.XML`). Hinweis: Das Kit referenziert zusätzlich das **Factory-808-Kit** – diese
+  Samples müssen auf der SD-Karte liegen, sonst lädt der Song zwar, die Drums bleiben
+  aber stumm. (Format inkl. Noten-Encoding/Tempo wurde gegen eine echte c1.2.1-Datei
+  verifiziert und auf dem Gerät getestet.)
 - **Song-Sheet (Text + Akkorde)** (optional) – aus einer Datei entsteht ein
   **Chord-Sheet wie bei Ultimate Guitar**: die Akkorde stehen über den jeweiligen
   Wörtern des gesungenen Textes. Ablauf komplett **lokal/offline**: Demucs trennt

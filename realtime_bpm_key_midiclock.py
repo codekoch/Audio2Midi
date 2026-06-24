@@ -3121,6 +3121,29 @@ def write_stems_to_files(stems, sr, out_dir, base="stems", log=None):
     return written
 
 
+def drums_downbeat_sec(drums, sr, frac=0.30):
+    """Robuster Downbeat (Takt 1 des Grooves) = erster KLARER Schlagzeug-Einsatz:
+    der erste Onset, der einen kraeftigen Bruchteil ('frac') der maximalen
+    Onset-Staerke erreicht. Zuverlaessig fuer Stuecke mit Drums-Einsatz nach einem
+    Intro (anders als die globale Onset-Phase, die bei langer Intro-Stille driftet).
+    Rueckgabe: Sekunden (0.0 wenn nichts gefunden)."""
+    import librosa
+    y = np.asarray(drums, dtype=np.float32)
+    if y.ndim == 2:
+        y = y.mean(axis=1)
+    if y.size == 0:
+        return 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        oenv = librosa.onset.onset_strength(y=y, sr=int(sr))
+    if oenv.size == 0 or float(oenv.max()) <= 0:
+        return 0.0
+    hop = 512
+    thr = float(frac) * float(oenv.max())
+    idx = int(np.argmax(oenv >= thr))      # erster Frame ueber der Schwelle
+    return idx * hop / float(sr)
+
+
 def bar_aligned_stems(stems, sr, lead_bars=2, beats_per_bar=4, log=None):
     """Schneidet ALLE Stems gemeinsam so, dass der Sample-Start exakt 'lead_bars'
     Takte VOR dem ersten Downbeat liegt (4/4-Annahme) -- ideal als getriggertes

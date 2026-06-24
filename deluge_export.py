@@ -13,6 +13,12 @@ Tick-Aufloesung: 96 Ticks/Viertel, 384 Ticks/Takt (4/4).
 Drum-Samples: Standard-808-Kit (Factory-Content auf der SD-Karte noetig).
 """
 import struct
+import os
+import numpy as np
+try:
+    import soundfile as sf
+except Exception:                                # nur fuer das Stem-Bundle noetig
+    sf = None
 
 TICKS_PER_QUARTER = 96
 TICKS_PER_BAR = TICKS_PER_QUARTER * 4
@@ -146,8 +152,37 @@ def _synth_clip_xml(name, ti, notes_by_pitch, length, section):
             f'<noteRows>{"".join(rows)}</noteRows></instrumentClip>')
 
 
+_AUDIO_PARAMS = """<params reverbAmount="0x80000000" volume="0xE0000000" pan="0x00000000" sidechainCompressorShape="0xDC28F5B2" modFXDepth="0x00000000" modFXRate="0xE0000000" stutterRate="0x00000000" sampleRateReduction="0x80000000" bitCrush="0x80000000" modFXOffset="0x00000000" modFXFeedback="0x80000000" compressorThreshold="0x00000000" lpfMorph="0x80000000" hpfMorph="0x80000000" tempo="0x00000000"><delay rate="0x00000000" feedback="0x80000000" /><lpf frequency="0x7FFFFFFF" resonance="0x80000000" /><hpf frequency="0x80000000" resonance="0x80000000" /><equalizer bass="0x00000000" treble="0x00000000" bassFrequency="0x00000000" trebleFrequency="0x00000000" /></params>"""
+
+
+def _audio_clip_xml(track_name, file_path, end_sample_pos, length, section, colour=11):
+    """Ein <audioClip>: spielt einen Stem-Sample taktgenau ab (Laenge = ganze Takte
+    -> Deluge legt ihn aufs Raster, kein Versatz). pitchSpeedIndependent=1 wie im
+    Beispiel; da die WAV exakt 'length' Takte am Songtempo lang ist, wird nicht
+    gestretcht."""
+    return (f'<audioClip trackName="{track_name}" filePath="{file_path}" '
+            f'startSamplePos="0" endSamplePos="{int(end_sample_pos)}" '
+            f'pitchSpeedIndependent="1" attack="-2147483648" priority="1" '
+            f'isPlaying="0" isSoloing="0" isArmedForRecording="0" '
+            f'length="{int(length)}" colourOffset="{colour}" '
+            f'section="{int(section)}">{_AUDIO_PARAMS}</audioClip>')
+
+
+def _audio_track_xml(name, colour=0):
+    """<audioTrack>-Instrument zu einem Stem-audioClip. Die Bindung erfolgt ueber
+    'name' == audioClip-trackName; ohne diesen Track meldet die Deluge „File
+    corrupted". Kind-Bloecke 1:1 aus dem c1.2.1-Beispiel."""
+    return (f'<audioTrack name="{name}" inputChannel="left" '
+            f'outputRecordingIndex="0" isArmedForRecording="0" '
+            f'activeModFunction="0" colour="{int(colour)}" '
+            f'modFXCurrentParam="feedback" currentFilterType="lpf" '
+            f'modFXType="none" lpfMode="24dB" hpfMode="HPLadder" '
+            f'filterRoute="H2L">{_DELAY}{_SIDECHAIN}{_AUDIOCOMP}</audioTrack>')
+
+
 def write_deluge_song(path, bpm, synth_tracks=None, drum_track=None,
-                      bars_per_clip=0):
+                      bars_per_clip=0, audio_clips=None, audio_tracks=None,
+                      force_song_bars=0):
     """Schreibt eine Deluge-Songdatei (.XML).
     synth_tracks: Liste {name, notes=[(start_s,end_s,pitch,vel),...]} -> je eine
                   interne Synth-Spur (ein Clip).
@@ -161,6 +196,8 @@ def write_deluge_song(path, bpm, synth_tracks=None, drum_track=None,
 
     # --- Instrumente ---
     instr = []
+    for nm in (audio_tracks or []):          # je Stem-audioClip ein <audioTrack>
+        instr.append(_audio_track_xml(nm))
     if drum_track is not None:
         used = sorted({int(p) % 128 for *_x, p, _v in drum_track.get("notes", [])
                        if int(p) in DELUGE_DRUM_MAP},
@@ -213,6 +250,8 @@ def write_deluge_song(path, bpm, synth_tracks=None, drum_track=None,
                 cl.append(_synth_clip_xml(name, ti, by_pitch, length, section))
         return cl
 
+    if force_song_bars and int(force_song_bars) > 0:   # feste Songlaenge (Bundle)
+        total = max(total, int(force_song_bars) * TICKS_PER_BAR)
     clips = []
     if bars_per_clip and int(bars_per_clip) > 0:    # Takt-Loops: mehrere Clips/Spur
         chunk = int(bars_per_clip) * TICKS_PER_BAR
@@ -221,6 +260,8 @@ def write_deluge_song(path, bpm, synth_tracks=None, drum_track=None,
     else:                                           # ein Clip je Spur (ganzer Song)
         clip_len = -(-total // TICKS_PER_BAR) * TICKS_PER_BAR
         clips = _clips_for_range(0, clip_len, clip_len, 0)
+    if audio_clips:                                 # Stem-audioClips (Bundle)
+        clips = list(audio_clips) + clips
 
     sections = "".join(f'<section id="{i}" numRepeats="0" />' for i in range(12))
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -238,3 +279,89 @@ def write_deluge_song(path, bpm, synth_tracks=None, drum_track=None,
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(xml)
     return path
+
+
+def write_deluge_bundle(xml_path, stems, sr, midi_notes, bpm, t_db,
+                        lead_bars=2, instruments=None,
+                        sample_subdir="SAMPLES/AudioWizard", log=None):
+    """GEMEINSAMES Bundle: richtet Stems UND MIDI mit DEMSELBEN Versatz aus, sodass
+    sie auf der Deluge garantiert synchron laufen und der Groove-Downbeat exakt auf
+    Takt (lead_bars+1) liegt.
+      * Versatz cut so, dass der Downbeat-Sample (t_db) genau bei lead_bars Takten
+        landet; Stems werden vorne getrimmt/gepolstert und hinten auf GANZE Takte
+        aufgefuellt (-> Deluge laedt sie gridgenau, kein Stretch).
+      * MIDI-Noten werden um cut nach vorne gezogen (gleicher Downbeat).
+    Schreibt die ausgerichteten Stem-WAVs NEBEN die XML; die audioClips referenzieren
+    sie unter 'sample_subdir' (dorthin auf die SD-Karte kopieren). Rueckgabe
+    (xml_path, [wav_paths])."""
+    if sf is None:
+        raise RuntimeError("soundfile nicht verfuegbar (pip install soundfile)")
+    instruments = list(instruments) if instruments else list(stems.keys())
+    sr = int(sr)
+    bpm = float(bpm) if bpm and bpm > 0 else 120.0
+    bar_n = int(round(4.0 * 60.0 / bpm * sr))            # Samples je Takt
+    lead_n = int(lead_bars) * bar_n
+    cut_n = int(round(float(t_db) * sr)) - lead_n        # Downbeat-Sample -> lead_n
+    cut_s = cut_n / float(sr)
+
+    def _align(a):
+        a = np.asarray(a, dtype=np.float32)
+        if a.ndim == 1:
+            a = a[:, None]
+        if cut_n >= 0:
+            a = a[cut_n:]
+        else:
+            a = np.concatenate([np.zeros((-cut_n,) + a.shape[1:], dtype=np.float32),
+                                a], axis=0)
+        return a
+
+    sel = [n for n in instruments if n in stems]         # nur vorhandene Stems
+    if not sel:
+        raise RuntimeError("keine Stems zum Ausrichten.")
+    aligned = {n: _align(stems[n]) for n in sel}
+    W = max(1, -(-max(len(a) for a in aligned.values()) // bar_n))   # ganze Takte
+    total_n = W * bar_n
+    for n, a in list(aligned.items()):
+        if len(a) < total_n:
+            a = np.concatenate([a, np.zeros((total_n - len(a),) + a.shape[1:],
+                                            dtype=np.float32)], axis=0)
+        aligned[n] = a[:total_n]
+
+    out_dir = os.path.dirname(xml_path) or "."
+    base = os.path.splitext(os.path.basename(xml_path))[0]
+    wavs, audio_clips, audio_tracks = [], [], []
+    for i, n in enumerate(sel):
+        wp = os.path.join(out_dir, f"{base}_{n}.wav")
+        sf.write(wp, aligned[n], sr, subtype="PCM_16")
+        wavs.append(wp)
+        fpath = f"{sample_subdir.rstrip('/')}/{base}_{n}.wav"
+        tname = f"AUDIO_{n}"
+        audio_tracks.append(tname)               # zugehoeriger <audioTrack>
+        audio_clips.append(_audio_clip_xml(
+            tname, fpath, total_n, W * TICKS_PER_BAR, section=1,
+            colour=(i * 17) % 72))
+        if log:
+            log(f"  Stem ausgerichtet: {os.path.basename(wp)}")
+
+    # MIDI-Spuren mit DEMSELBEN Versatz (cut) -> gleicher Downbeat
+    label = {"bass": "Bass", "other": "Rest", "vocals": "Vocals"}
+    synth_tracks, drum_track = [], None
+    for n in instruments:
+        notes = (midi_notes or {}).get(n)
+        if not notes:
+            continue
+        shifted = [(max(0.0, s - cut_s), e - cut_s, p, v) for (s, e, p, v) in notes
+                   if (e - cut_s) > 0.0]
+        if n == "drums":
+            drum_track = {"notes": shifted}
+        else:
+            synth_tracks.append({"name": label.get(n, n), "notes": shifted})
+
+    write_deluge_song(xml_path, bpm, synth_tracks=synth_tracks,
+                      drum_track=drum_track, bars_per_clip=0,
+                      audio_clips=audio_clips, audio_tracks=audio_tracks,
+                      force_song_bars=W)
+    if log:
+        log(f"Bundle: {len(wavs)} Stems + MIDI, Downbeat bei Takt {lead_bars + 1}, "
+            f"Songlaenge {W} Takte.")
+    return xml_path, wavs
